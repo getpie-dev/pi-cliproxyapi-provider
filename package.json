@@ -7,7 +7,7 @@
   "author": "oxwen11",
   "repository": {
     "type": "git",
-    "url": "https://github.com/getpie-dev/pi-cliproxyapi-provider"
+    "url": "git+https://github.com/getpie-dev/pi-cliproxyapi-provider.git"
   },
   "keywords": [
     "pi-package",
