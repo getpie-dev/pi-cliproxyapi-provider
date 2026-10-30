@@ -88,7 +88,7 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
     ]);
   });
 
-  it("loads remote models on startup and registers provider with resolved !command apiKey", async () => {
+  it("loads remote models on startup and registers provider with !command apiKey", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-cpa-test-"));
     const prevDir = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = dir;
@@ -120,7 +120,7 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
       expect(registerProvider).toHaveBeenCalledWith(
         "cpa",
         expect.objectContaining({
-          apiKey: "op-secret-key",
+          apiKey: cmd,
           models: [expect.objectContaining({ id: "gpt-6.1-sol" })],
         }),
       );

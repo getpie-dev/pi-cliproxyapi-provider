@@ -160,27 +160,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const providerName = String(
     process.env.CLIPROXYAPI_PROVIDER_NAME ?? cfg.providerName ?? providerId,
   ).trim();
-
-  let apiKey: string | undefined;
-  try {
-    apiKey = resolveKey(process.env.CLIPROXYAPI_API_KEY ?? cfg.apiKey);
-  } catch {
-    return;
-  }
-  if (!apiKey) return;
+  const rawKey = String(process.env.CLIPROXYAPI_API_KEY ?? cfg.apiKey ?? "").trim();
+  if (!rawKey) return;
 
   const { inferenceBaseUrl, modelsUrl } = resolveEndpoints(
     process.env.CLIPROXYAPI_BASE_URL ?? cfg.baseUrl,
   );
   const cachePath = join(agentDir, "cliproxyapi-models.json");
 
-  const register = (models: ProviderModelConfig[], key: string) => {
+  const register = (models: ProviderModelConfig[]) => {
     pi.unregisterProvider(providerId);
     pi.registerProvider(providerId, {
       name: providerName,
       baseUrl: inferenceBaseUrl,
       api: "openai-codex-responses",
-      apiKey: key,
+      apiKey: rawKey,
       models,
       streamSimple: (model, context, options) => {
         ensureWsPatch();
@@ -210,7 +204,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const models = await fetchModels(modelsUrl, key);
     mkdirSync(dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, `${JSON.stringify({ modelsUrl, models }, null, 2)}\n`);
-    register(models, key);
+    register(models);
     return models;
   };
 
@@ -239,8 +233,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       Array.isArray(cached.models) &&
       cached.models.length > 0
     ) {
-      register(cached.models, apiKey);
-      void refresh().catch(() => {});
+      register(cached.models);
+      // Only auto-refresh on startup for non-command keys so locked 1Password never blocks or races Pi.
+      if (!rawKey.startsWith("!")) {
+        void refresh().catch(() => {});
+      }
       return;
     }
   } catch {}
