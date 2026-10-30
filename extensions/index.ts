@@ -14,6 +14,7 @@ const JWT_CLAIM = Buffer.from(
 ).toString("base64url");
 const WS_PATCHED = Symbol.for("@getpie/pi-cliproxyapi-provider.ws");
 const codexApi = openAICodexResponsesApi();
+const keyCache = new Map<string, string>();
 
 export interface RemoteModelItem {
   slug?: string;
@@ -83,13 +84,16 @@ export function resolveKey(raw: string | undefined): string | undefined {
   const s = raw?.trim();
   if (!s) return undefined;
   if (s.startsWith("!")) {
-    return (
-      execSync(s.slice(1), {
-        encoding: "utf8",
-        timeout: 10_000,
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim() || undefined
-    );
+    const cmd = s.slice(1).trim();
+    const cached = keyCache.get(cmd);
+    if (cached) return cached;
+    const out = execSync(cmd, {
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (out) keyCache.set(cmd, out);
+    return out || undefined;
   }
   const env = s.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/)?.[1];
   return env ? process.env[env]?.trim() || undefined : s;
@@ -156,21 +160,27 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const providerName = String(
     process.env.CLIPROXYAPI_PROVIDER_NAME ?? cfg.providerName ?? providerId,
   ).trim();
-  const rawKey = String(process.env.CLIPROXYAPI_API_KEY ?? cfg.apiKey ?? "").trim();
-  if (!rawKey) return;
+
+  let apiKey: string | undefined;
+  try {
+    apiKey = resolveKey(process.env.CLIPROXYAPI_API_KEY ?? cfg.apiKey);
+  } catch {
+    return;
+  }
+  if (!apiKey) return;
 
   const { inferenceBaseUrl, modelsUrl } = resolveEndpoints(
     process.env.CLIPROXYAPI_BASE_URL ?? cfg.baseUrl,
   );
   const cachePath = join(agentDir, "cliproxyapi-models.json");
 
-  const register = (models: ProviderModelConfig[]) => {
+  const register = (models: ProviderModelConfig[], key: string) => {
     pi.unregisterProvider(providerId);
     pi.registerProvider(providerId, {
       name: providerName,
       baseUrl: inferenceBaseUrl,
       api: "openai-codex-responses",
-      apiKey: rawKey,
+      apiKey: key,
       models,
       streamSimple: (model, context, options) => {
         ensureWsPatch();
@@ -200,7 +210,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const models = await fetchModels(modelsUrl, key);
     mkdirSync(dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, `${JSON.stringify({ modelsUrl, models }, null, 2)}\n`);
-    register(models);
+    register(models, key);
     return models;
   };
 
@@ -229,7 +239,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       Array.isArray(cached.models) &&
       cached.models.length > 0
     ) {
-      register(cached.models);
+      register(cached.models, apiKey);
       void refresh().catch(() => {});
       return;
     }
