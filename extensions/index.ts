@@ -71,18 +71,26 @@ export function patchHeaders(headers: Headers | Record<string, string> | undefin
   }
 }
 
-function ensureWsPatch(): void {
+export function ensureWsPatch(): void {
   const ws = globalThis.WebSocket as (typeof WebSocket & { [WS_PATCHED]?: boolean }) | undefined;
   if (typeof ws !== "function" || ws[WS_PATCHED]) return;
   const Patched = new Proxy(ws, {
     construct(target, args, newTarget) {
-      if (args[1] && typeof args[1] === "object" && !Array.isArray(args[1]) && args[1].headers) {
-        const headers =
-          args[1].headers instanceof Headers
-            ? new Headers(args[1].headers)
-            : { ...args[1].headers };
+      const init = args[1] && typeof args[1] === "object" ? args[1].headers : undefined;
+      let headers: Headers | undefined;
+      try {
+        headers = init ? new Headers(init) : undefined;
+      } catch {}
+      // Only rewrite our own wrapped key; every other WebSocket gets its arguments untouched.
+      if (headers && unwrapAuth(headers.get("authorization"))) {
         patchHeaders(headers);
-        args = [args[0], { ...args[1], headers }, ...args.slice(2)];
+        const patched =
+          init instanceof Headers
+            ? headers
+            : Array.isArray(init)
+              ? [...headers]
+              : Object.fromEntries(headers);
+        args = [args[0], { ...args[1], headers: patched }, ...args.slice(2)];
       }
       return Reflect.construct(target, args, newTarget);
     },
