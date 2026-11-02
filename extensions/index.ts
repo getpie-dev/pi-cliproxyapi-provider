@@ -1,7 +1,13 @@
-import { execSync } from "node:child_process";
+import { exec } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { cleanupSessionResources, type Model, normalizeContext } from "@earendil-works/pi-ai";
+import {
+  cleanupSessionResources,
+  createProvider,
+  type Model,
+  normalizeContext,
+  type ProviderStreams,
+} from "@earendil-works/pi-ai";
 import { openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
 import {
   type ExtensionAPI,
@@ -14,7 +20,13 @@ const JWT_CLAIM = Buffer.from(
 ).toString("base64url");
 const WS_PATCHED = Symbol.for("@getpie/pi-cliproxyapi-provider.ws");
 const codexApi = openAICodexResponsesApi();
-const keyCache = new Map<string, string>();
+const KEY_CACHE = Symbol.for("@getpie/pi-cliproxyapi-provider.keys");
+const processState = globalThis as typeof globalThis & {
+  [KEY_CACHE]?: Map<string, Promise<string | undefined>>;
+};
+// Keep successful command results even when the extension is reloaded.
+processState[KEY_CACHE] ??= new Map();
+const keyCache = processState[KEY_CACHE];
 
 export interface RemoteModelItem {
   slug?: string;
@@ -80,20 +92,34 @@ function ensureWsPatch(): void {
   globalThis.WebSocket = Patched;
 }
 
-export function resolveKey(raw: string | undefined): string | undefined {
+export async function resolveKey(raw: string | undefined): Promise<string | undefined> {
   const s = raw?.trim();
   if (!s) return undefined;
   if (s.startsWith("!")) {
     const cmd = s.slice(1).trim();
     const cached = keyCache.get(cmd);
     if (cached) return cached;
-    const out = execSync(cmd, {
-      encoding: "utf8",
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (out) keyCache.set(cmd, out);
-    return out || undefined;
+    const pending = new Promise<string | undefined>((resolve, reject) => {
+      const child = exec(cmd, { encoding: "utf8", timeout: 10_000 }, (error, stdout) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(stdout.trim() || undefined);
+        }
+      });
+      child.stdin?.end();
+    })
+      .then((key) => {
+        if (!key) keyCache.delete(cmd);
+        return key;
+      })
+      .catch((error) => {
+        keyCache.delete(cmd);
+        // Child-process errors can contain the command and secret output.
+        throw new Error(error.killed ? "API key command timed out" : "API key command failed");
+      });
+    keyCache.set(cmd, pending);
+    return pending;
   }
   const env = s.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/)?.[1];
   return env ? process.env[env]?.trim() || undefined : s;
@@ -168,38 +194,63 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   );
   const cachePath = join(agentDir, "cliproxyapi-models.json");
 
+  const streamSimple: ProviderStreams["streamSimple"] = (model, context, options) => {
+    ensureWsPatch();
+    return codexApi.streamSimple(
+      model as Model<"openai-codex-responses">,
+      normalizeContext(context),
+      {
+        ...options,
+        ...(options?.apiKey ? { apiKey: wrapKey(options.apiKey) } : {}),
+        fetch: async (input, init) => {
+          if (init?.headers) {
+            const headers = new Headers(init.headers);
+            patchHeaders(headers);
+            init = { ...init, headers };
+          }
+          return (options?.fetch ?? globalThis.fetch)(input, init);
+        },
+      },
+    );
+  };
+
   const register = (models: ProviderModelConfig[]) => {
     pi.unregisterProvider(providerId);
-    pi.registerProvider(providerId, {
-      name: providerName,
-      baseUrl: inferenceBaseUrl,
-      api: "openai-codex-responses",
-      apiKey: rawKey,
-      models,
-      streamSimple: (model, context, options) => {
-        ensureWsPatch();
-        return codexApi.streamSimple(
-          model as Model<"openai-codex-responses">,
-          normalizeContext(context),
-          {
-            ...options,
-            ...(options?.apiKey ? { apiKey: wrapKey(options.apiKey) } : {}),
-            fetch: async (input, init) => {
-              if (init?.headers) {
-                const headers = new Headers(init.headers);
-                patchHeaders(headers);
-                init = { ...init, headers };
-              }
-              return (options?.fetch ?? globalThis.fetch)(input, init);
+    pi.registerProvider(
+      createProvider({
+        id: providerId,
+        name: providerName,
+        baseUrl: inferenceBaseUrl,
+        auth: {
+          apiKey: {
+            name: providerName,
+            check: async ({ credential }) => {
+              const configured = credential
+                ? credential.key
+                : rawKey.startsWith("!") || (await resolveKey(rawKey));
+              return configured ? { type: "api_key", source: "configured API key" } : undefined;
+            },
+            resolve: async ({ credential }) => {
+              const key = credential ? credential.key : await resolveKey(rawKey);
+              return key
+                ? { auth: { apiKey: key }, env: credential?.env, source: "configured API key" }
+                : undefined;
             },
           },
-        );
-      },
-    });
+        },
+        models: models.map((model) => ({
+          ...model,
+          provider: providerId,
+          api: "openai-codex-responses" as const,
+          baseUrl: inferenceBaseUrl,
+        })),
+        api: { stream: streamSimple, streamSimple },
+      }),
+    );
   };
 
   const refresh = async () => {
-    const key = resolveKey(process.env.CLIPROXYAPI_API_KEY ?? readCfg().apiKey);
+    const key = await resolveKey(process.env.CLIPROXYAPI_API_KEY ?? readCfg().apiKey);
     if (!key) throw new Error("Missing API key");
     const models = await fetchModels(modelsUrl, key);
     mkdirSync(dirname(cachePath), { recursive: true });
