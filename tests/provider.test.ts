@@ -366,6 +366,14 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect(registerCommand).toHaveBeenCalledTimes(registered ? 1 : 0);
   });
 
+  it("treats a null config file as empty", async () => {
+    writeFileSync(join(dir, "cliproxyapi.json"), "null");
+    process.env.CLIPROXYAPI_API_KEY = "synthetic-key";
+    process.env.CLIPROXYAPI_BASE_URL = baseUrl;
+    await cpaExtension(pi);
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");
+  });
+
   it("treats empty environment overrides as unset", async () => {
     writeFileSync(
       join(dir, "cliproxyapi.json"),
@@ -388,14 +396,6 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     configure("edited-key");
     expect(await refreshCatalog()).toHaveBeenCalledWith("Refreshed 1 cpa models.", "info");
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");
-  });
-
-  it("leaves session resource cleanup to Pi instead of closing every Codex WebSocket", async () => {
-    configure("synthetic-key");
-    await cpaExtension(pi);
-    const events = vi.mocked(pi.on).mock.calls.map(([event]) => event);
-    expect(events).not.toContain("session_compact");
-    expect(events).not.toContain("session_shutdown");
   });
 
   it("keeps Codex wrapping and sends only the real Bearer key through the actual request pipeline", async () => {

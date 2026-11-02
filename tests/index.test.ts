@@ -135,7 +135,7 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
       timeout.mockRestore();
     }
   }, 1_000);
-  it("rewrites only WebSockets carrying a wrapped key, including tuple headers", () => {
+  it("rewrites only WebSockets carrying a wrapped key, including tuple headers, to a plain object", () => {
     const original = globalThis.WebSocket;
     const calls: unknown[][] = [];
     globalThis.WebSocket = class {
@@ -153,7 +153,7 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
         ["chatgpt-account-id", "cpa"],
       ];
       new globalThis.WebSocket("ws://b", { headers } as never);
-      expect(calls[1]![1]).toEqual({ headers: [["authorization", "Bearer real-key"]] });
+      expect(calls[1]![1]).toEqual({ headers: { authorization: "Bearer real-key" } });
     } finally {
       globalThis.WebSocket = original;
     }

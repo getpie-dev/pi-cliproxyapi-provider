@@ -50,25 +50,13 @@ export function unwrapAuth(value: string | null | undefined): string | undefined
   return m?.[1] ? `Bearer ${Buffer.from(m[1], "base64url").toString("utf8")}` : undefined;
 }
 
-export function patchHeaders(headers: Headers | Record<string, string> | undefined): void {
-  if (!headers) return;
-  if (headers instanceof Headers) {
-    const real = unwrapAuth(headers.get("authorization"));
-    if (real) {
-      headers.set("authorization", real);
-      headers.delete("chatgpt-account-id");
-    }
-    return;
-  }
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === "authorization") {
-      const real = unwrapAuth(v);
-      if (real) {
-        headers[k] = real;
-        delete headers["chatgpt-account-id"];
-      }
-    }
-  }
+/** Replaces our wrapped key with the real one; returns whether anything was rewritten. */
+export function patchHeaders(headers: Headers): boolean {
+  const real = unwrapAuth(headers.get("authorization"));
+  if (!real) return false;
+  headers.set("authorization", real);
+  headers.delete("chatgpt-account-id");
+  return true;
 }
 
 export function ensureWsPatch(): void {
@@ -81,16 +69,9 @@ export function ensureWsPatch(): void {
       try {
         headers = init ? new Headers(init) : undefined;
       } catch {}
-      // Only rewrite our own wrapped key; every other WebSocket gets its arguments untouched.
-      if (headers && unwrapAuth(headers.get("authorization"))) {
-        patchHeaders(headers);
-        const patched =
-          init instanceof Headers
-            ? headers
-            : Array.isArray(init)
-              ? [...headers]
-              : Object.fromEntries(headers);
-        args = [args[0], { ...args[1], headers: patched }, ...args.slice(2)];
+      // Only rewrite our own wrapped key (Pi passes a plain object); other WebSockets are untouched.
+      if (headers && patchHeaders(headers)) {
+        args = [args[0], { ...args[1], headers: Object.fromEntries(headers) }, ...args.slice(2)];
       }
       return Reflect.construct(target, args, newTarget);
     },
@@ -197,20 +178,16 @@ export async function fetchModels(
 
 export default async function (pi: ExtensionAPI): Promise<void> {
   const agentDir = getAgentDir();
-  const readCfg = (): Record<string, string | undefined> => {
-    try {
-      return JSON.parse(readFileSync(join(agentDir, "cliproxyapi.json"), "utf8"));
-    } catch {
-      return {};
-    }
-  };
-  const cfg = readCfg();
+  let cfg: Record<string, string | undefined> = {};
+  try {
+    cfg = JSON.parse(readFileSync(join(agentDir, "cliproxyapi.json"), "utf8")) ?? {};
+  } catch {}
   // Empty env or config values count as unset.
   const setting = (env: string, key: string) =>
     process.env[env]?.trim() || String(cfg[key] ?? "").trim() || undefined;
   const providerId = setting("CLIPROXYAPI_PROVIDER_ID", "providerId") ?? "cpa";
   const providerName = setting("CLIPROXYAPI_PROVIDER_NAME", "providerName") ?? providerId;
-  const rawKey = setting("CLIPROXYAPI_API_KEY", "apiKey") ?? "";
+  const rawKey = setting("CLIPROXYAPI_API_KEY", "apiKey");
   if (!rawKey) return;
 
   let endpoints: ReturnType<typeof resolveEndpoints>;
