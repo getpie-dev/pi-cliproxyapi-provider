@@ -23,7 +23,7 @@ const KEY_CACHE = Symbol.for("@getpie/pi-cliproxyapi-provider.keys");
 const processState = globalThis as typeof globalThis & {
   [KEY_CACHE]?: Map<string, Promise<string | undefined>>;
 };
-// Shared across module instances; each extension load clears it so a reload picks up rotated secrets.
+// On globalThis: Pi re-imports this module (jiti moduleCache: false) on /reload and on cwd changes.
 processState[KEY_CACHE] ??= new Map();
 const keyCache = processState[KEY_CACHE];
 
@@ -195,7 +195,6 @@ export async function fetchModels(
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-  keyCache.clear();
   const agentDir = getAgentDir();
   const readCfg = (): Record<string, string | undefined> => {
     try {
@@ -297,6 +296,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify(`Refresh failed: ${e instanceof Error ? e.message : String(e)}`, "error");
       }
     },
+  });
+
+  // Pi also re-runs this factory on /new, /resume and /fork; only /reload re-reads a command key.
+  pi.on("session_start", (event) => {
+    if (event.reason !== "reload" || !rawKey.startsWith("!")) return;
+    keyCache.delete(rawKey.slice(1).trim());
+    void resolveKey(rawKey).catch(() => {});
   });
 
   try {

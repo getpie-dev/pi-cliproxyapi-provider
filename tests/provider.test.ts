@@ -209,7 +209,7 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect(childProcess.execSync).not.toHaveBeenCalled();
   });
 
-  it("reuses a command key within one load and re-runs it after an extension reload", async () => {
+  it("reuses a command key across /new, /resume and /fork and re-runs it on /reload", async () => {
     const value = join(dir, "value");
     writeFileSync(value, "old-key");
     const script = join(dir, "rotate.cjs");
@@ -221,8 +221,21 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     await cpaExtension(pi);
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("old-key");
     writeFileSync(value, "rotated-key");
-    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("old-key");
-    await cpaExtension(pi);
+    // Pi calls the factory again, then emits session_start, for every session replacement.
+    const load = async (reason: string) => {
+      await cpaExtension(pi);
+      const calls = vi.mocked(pi.on).mock.calls as unknown as [
+        string,
+        (event: unknown) => unknown,
+      ][];
+      const handler = calls.filter(([event]) => event === "session_start").at(-1)![1];
+      await handler({ type: "session_start", reason });
+    };
+    for (const reason of ["new", "resume", "fork"]) {
+      await load(reason);
+      expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("old-key");
+    }
+    await load("reload");
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("rotated-key");
   });
 

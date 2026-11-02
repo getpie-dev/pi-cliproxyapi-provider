@@ -14,9 +14,9 @@ in the background as soon as the extension loads, so the first authenticated req
 running or finished result; cold model discovery awaits it. Model availability checks never execute it.
 
 Concurrent lookups of the same trimmed command share one execution. Successful, nonempty, trimmed
-output is cached in process memory until the extension is next loaded. There is no TTL or automatic
-credential refresh. **Reload extensions (or restart Pi) after rotating a command-backed credential**;
-each load drops the cached result and runs the command again. `/cliproxyapi-refresh` refreshes the
+output is cached in process memory and reused across `/new`, `/resume` and `/fork`. There is no TTL
+or automatic credential refresh. **Run `/reload` (or restart Pi) after rotating a command-backed
+credential**; a reload drops the cached result and runs the command again. `/cliproxyapi-refresh` refreshes the
 model catalog with the loaded credential and does not re-run the command. Nothing persists the
 resolved command output to disk. Failures, ten-second timeouts, and empty output are not cached,
 so the next lookup can retry. Command errors do not expose the command or its output.
