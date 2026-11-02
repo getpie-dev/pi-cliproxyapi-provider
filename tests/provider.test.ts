@@ -209,6 +209,23 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect(childProcess.execSync).not.toHaveBeenCalled();
   });
 
+  it("reuses a command key within one load and re-runs it after an extension reload", async () => {
+    const value = join(dir, "value");
+    writeFileSync(value, "old-key");
+    const script = join(dir, "rotate.cjs");
+    writeFileSync(
+      script,
+      `process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(value)}, "utf8"))`,
+    );
+    configure(`!exec "${process.execPath}" "${script}"`);
+    await cpaExtension(pi);
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("old-key");
+    writeFileSync(value, "rotated-key");
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("old-key");
+    await cpaExtension(pi);
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("rotated-key");
+  });
+
   it("never falls back to raw commands after failure or empty output, and retries safely", async () => {
     const script = join(dir, "retry.cjs");
     const value = join(dir, "value");

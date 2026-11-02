@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveKey } from "../extensions/index.ts";
 
 let dir: string;
@@ -26,7 +26,7 @@ ${body}`,
 }
 
 describe("asynchronous command credentials", () => {
-  it("stays responsive, deduplicates concurrent calls, and caches success across reloads", async () => {
+  it("stays responsive, deduplicates concurrent calls, and caches success", async () => {
     const { raw, marker } = command(
       'setTimeout(() => process.stdout.write("  synthetic-key\\n"), 350)',
     );
@@ -40,13 +40,10 @@ describe("asynchronous command credentials", () => {
     expect(settled).toBe(false);
     expect(await Promise.all([first, second])).toEqual(["synthetic-key", "synthetic-key"]);
     expect(await resolveKey(raw)).toBe("synthetic-key");
-    vi.resetModules();
-    const reloaded = await import("../extensions/index.ts");
-    expect(await reloaded.resolveKey(raw)).toBe("synthetic-key");
     expect(readFileSync(marker, "utf8")).toBe("x");
   });
 
-  it("clears successful credentials only in a new process", async () => {
+  it("keeps successful credentials within a load and re-runs in a new process", async () => {
     const value = join(dir, "rotating-key");
     writeFileSync(value, "old-key");
     const { raw, marker } = command(

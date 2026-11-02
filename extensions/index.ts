@@ -23,7 +23,7 @@ const KEY_CACHE = Symbol.for("@getpie/pi-cliproxyapi-provider.keys");
 const processState = globalThis as typeof globalThis & {
   [KEY_CACHE]?: Map<string, Promise<string | undefined>>;
 };
-// Keep successful command results even when the extension is reloaded.
+// Shared across module instances; each extension load clears it so a reload picks up rotated secrets.
 processState[KEY_CACHE] ??= new Map();
 const keyCache = processState[KEY_CACHE];
 
@@ -195,6 +195,7 @@ export async function fetchModels(
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
+  keyCache.clear();
   const agentDir = getAgentDir();
   const readCfg = (): Record<string, string | undefined> => {
     try {
