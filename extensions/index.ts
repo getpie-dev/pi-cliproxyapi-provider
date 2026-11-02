@@ -157,10 +157,22 @@ export async function fetchModels(
             .toLowerCase(),
         )
         .filter(Boolean);
+      // Pi hides levels mapped to null and omits the reasoning field when "off" maps to null.
+      const level = (effort: string) => (efforts.includes(effort) ? effort : null);
       return {
         id,
         name: String(m.display_name ?? m.name ?? id).trim(),
         reasoning: efforts.length > 0,
+        ...(efforts.length > 0 && {
+          thinkingLevelMap: {
+            off: level("none"),
+            minimal: level("minimal"),
+            low: level("low"),
+            medium: level("medium"),
+            high: level("high"),
+            xhigh: level("xhigh"),
+          },
+        }),
         input: (m.input_modalities ?? []).some((x) => String(x).toLowerCase() === "image")
           ? (["text", "image"] as Array<"text" | "image">)
           : (["text"] as Array<"text" | "image">),

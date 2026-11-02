@@ -1,3 +1,4 @@
+import { getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
   fetchModels,
@@ -79,11 +80,42 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
         id: "gpt-6.1-sol",
         name: "GPT 6.1 Sol",
         reasoning: true,
+        thinkingLevelMap: {
+          off: null,
+          minimal: null,
+          low: null,
+          medium: null,
+          high: "high",
+          xhigh: null,
+        },
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 500_000,
         maxTokens: 128_000,
       },
     ]);
+  });
+  it("maps server reasoning levels to Pi thinking levels", async () => {
+    const [model] = await fetchModels(
+      "https://cpa.example.invalid/v1/models",
+      "k",
+      (async () =>
+        new Response(
+          JSON.stringify([
+            { id: "m", supported_reasoning_levels: ["none", "low", "medium", "high", "xhigh"] },
+          ]),
+        )) as typeof fetch,
+    );
+    expect((model as Model<"openai-codex-responses">).thinkingLevelMap).toEqual({
+      off: "none",
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+    });
+    expect(getSupportedThinkingLevels(model as unknown as Model<"openai-codex-responses">)).toEqual(
+      ["off", "low", "medium", "high", "xhigh"],
+    );
   });
 });
