@@ -22,7 +22,7 @@ resolved command output to disk. Failures, ten-second timeouts, and empty output
 so the next lookup can retry. Command errors do not expose the command or its output.
 
 Literal keys and `$NAME` / `${NAME}` environment references retain their existing behavior.
-`CLIPROXYAPI_API_KEY` overrides `cliproxyapi.json`. For the same provider, request keys, runtime keys,
+A non-empty `CLIPROXYAPI_API_KEY` overrides `cliproxyapi.json`. For the same provider, request keys, runtime keys,
 and stored credentials outrank a `models.json` credential, and that file outranks the extension credential.
 
 ## Install
