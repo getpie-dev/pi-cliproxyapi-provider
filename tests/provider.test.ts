@@ -264,7 +264,10 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     ["empty", "", true],
     ["invalid", "http://[", false],
   ])("falls back for an %s base URL instead of crashing startup", async (_kind, url, registered) => {
-    writeFileSync(join(dir, "cliproxyapi.json"), JSON.stringify({ apiKey: "synthetic-key", baseUrl: url }));
+    writeFileSync(
+      join(dir, "cliproxyapi.json"),
+      JSON.stringify({ apiKey: "synthetic-key", baseUrl: url }),
+    );
     process.env.CLIPROXYAPI_BASE_URL = url;
     await expect(cpaExtension(pi)).resolves.toBeUndefined();
     expect(registerCommand).toHaveBeenCalledTimes(registered ? 1 : 0);
