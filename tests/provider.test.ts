@@ -130,12 +130,12 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect((await runtime.getAuth("cpa", { apiKey: "request-key" }))?.auth.apiKey).toBe(
       "request-key",
     );
-    expect(existsSync(marker)).toBe(false);
     await runtime.removeRuntimeApiKey("cpa");
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("stored-key");
     await credentials.delete("cpa");
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("models-key");
-    expect(existsSync(marker)).toBe(false);
+    // Only the background startup prewarm runs the command; auth resolution never does.
+    await vi.waitFor(() => expect(readFileSync(marker, "utf8")).toBe("x"));
     expect(childProcess.execSync).not.toHaveBeenCalled();
   });
 
@@ -153,14 +153,27 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("models-key");
   });
 
-  it("keeps cached startup and model availability secret-manager-free, then authenticates asynchronously", async () => {
+  it("prewarms a command key at cached startup without awaiting it, then reuses it for auth", async () => {
+    const { raw, marker } = slowCommand();
+    configure(raw);
+    const started = Date.now();
+    await cpaExtension(pi);
+    // The command sleeps 350ms; startup must not wait for it.
+    expect(Date.now() - started).toBeLessThan(300);
+    await vi.waitFor(() => expect(existsSync(marker)).toBe(true));
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");
+    expect(readFileSync(marker, "utf8")).toBe("x");
+    expect(childProcess.execSync).not.toHaveBeenCalled();
+  });
+
+  it("keeps cached startup and model availability non-blocking, then authenticates asynchronously", async () => {
     const { raw, marker } = slowCommand();
     configure(raw);
     await cpaExtension(pi);
     await runtime.refresh({ allowNetwork: false });
     expect(runtime.getModel("cpa", "test-model")).toBeDefined();
     expect(await runtime.getAvailable("cpa")).toHaveLength(1);
-    expect(existsSync(marker)).toBe(false);
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(runtime.getRegisteredProviderConfig("cpa")).toBeUndefined();
 
@@ -218,7 +231,7 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect(childProcess.execSync).not.toHaveBeenCalled();
   });
 
-  it("preserves stored/runtime keys over extension env/config, without executing the command", async () => {
+  it("preserves stored/runtime keys over extension env/config", async () => {
     const { raw, marker } = slowCommand();
     configure("config-key");
     process.env.CLIPROXYAPI_API_KEY = raw;
@@ -230,7 +243,6 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect((await runtime.getAuth("cpa", { apiKey: "request-key" }))?.auth.apiKey).toBe(
       "request-key",
     );
-    expect(existsSync(marker)).toBe(false);
     await runtime.removeRuntimeApiKey("cpa");
     await credentials.delete("cpa");
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");

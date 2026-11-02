@@ -285,8 +285,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       cached.models.length > 0
     ) {
       register(cached.models);
-      // Only auto-refresh on startup for non-command keys so locked 1Password never blocks or races Pi.
-      if (!rawKey.startsWith("!")) {
+      // Command keys are prewarmed in the background without blocking startup; others refresh the catalog.
+      if (rawKey.startsWith("!")) {
+        void resolveKey(rawKey).catch(() => {});
+      } else {
         void refresh().catch(() => {});
       }
       return;
