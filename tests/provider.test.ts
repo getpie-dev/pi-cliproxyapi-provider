@@ -273,6 +273,30 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect(registerCommand).toHaveBeenCalledTimes(registered ? 1 : 0);
   });
 
+  it("treats empty environment overrides as unset", async () => {
+    writeFileSync(
+      join(dir, "cliproxyapi.json"),
+      JSON.stringify({ apiKey: "synthetic-key", baseUrl, providerId: "cpa2", providerName: "CPA" }),
+    );
+    for (const name of ["API_KEY", "BASE_URL", "PROVIDER_ID", "PROVIDER_NAME"]) {
+      process.env[`CLIPROXYAPI_${name}`] = "";
+    }
+    await cpaExtension(pi);
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      resolveEndpoints(baseUrl).modelsUrl,
+      expect.anything(),
+    );
+    expect((await runtime.getAuth("cpa2"))?.auth.apiKey).toBe("synthetic-key");
+  });
+
+  it("refreshes with the same load-time key that authenticates requests", async () => {
+    configure("synthetic-key");
+    await cpaExtension(pi);
+    configure("edited-key");
+    expect(await refreshCatalog()).toHaveBeenCalledWith("Refreshed 1 cpa models.", "info");
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");
+  });
+
   it("leaves session resource cleanup to Pi instead of closing every Codex WebSocket", async () => {
     configure("synthetic-key");
     await cpaExtension(pi);

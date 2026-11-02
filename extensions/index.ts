@@ -195,16 +195,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     }
   };
   const cfg = readCfg();
-  const providerId = String(process.env.CLIPROXYAPI_PROVIDER_ID ?? cfg.providerId ?? "cpa").trim();
-  const providerName = String(
-    process.env.CLIPROXYAPI_PROVIDER_NAME ?? cfg.providerName ?? providerId,
-  ).trim();
-  const rawKey = String(process.env.CLIPROXYAPI_API_KEY ?? cfg.apiKey ?? "").trim();
+  // Empty env or config values count as unset.
+  const setting = (env: string, key: string) =>
+    process.env[env]?.trim() || String(cfg[key] ?? "").trim() || undefined;
+  const providerId = setting("CLIPROXYAPI_PROVIDER_ID", "providerId") ?? "cpa";
+  const providerName = setting("CLIPROXYAPI_PROVIDER_NAME", "providerName") ?? providerId;
+  const rawKey = setting("CLIPROXYAPI_API_KEY", "apiKey") ?? "";
   if (!rawKey) return;
 
   let endpoints: ReturnType<typeof resolveEndpoints>;
   try {
-    endpoints = resolveEndpoints(process.env.CLIPROXYAPI_BASE_URL ?? cfg.baseUrl);
+    endpoints = resolveEndpoints(setting("CLIPROXYAPI_BASE_URL", "baseUrl"));
   } catch {
     return; // Invalid base URL: skip registration rather than crash extension loading.
   }
@@ -267,7 +268,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   };
 
   const refresh = async () => {
-    const key = await resolveKey(process.env.CLIPROXYAPI_API_KEY ?? readCfg().apiKey);
+    const key = await resolveKey(rawKey);
     if (!key) throw new Error("Missing API key");
     const models = await fetchModels(modelsUrl, key);
     mkdirSync(dirname(cachePath), { recursive: true });
