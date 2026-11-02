@@ -62,6 +62,7 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
           JSON.stringify({
             data: [
               { id: "hidden", visibility: "hide" },
+              { id: "unlisted", visibility: "none" },
               {
                 slug: "gpt-6.1-sol",
                 display_name: "GPT 6.1 Sol",
