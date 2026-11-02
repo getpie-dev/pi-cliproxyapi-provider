@@ -2,7 +2,6 @@ import { exec } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  cleanupSessionResources,
   createProvider,
   type Model,
   normalizeContext,
@@ -270,9 +269,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       }
     },
   });
-
-  pi.on("session_compact", () => cleanupSessionResources());
-  pi.on("session_shutdown", () => cleanupSessionResources());
 
   try {
     const cached = JSON.parse(readFileSync(cachePath, "utf8")) as {

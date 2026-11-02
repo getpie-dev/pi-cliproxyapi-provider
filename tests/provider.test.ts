@@ -260,6 +260,14 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalledOnce());
   });
 
+  it("leaves session resource cleanup to Pi instead of closing every Codex WebSocket", async () => {
+    configure("synthetic-key");
+    await cpaExtension(pi);
+    const events = vi.mocked(pi.on).mock.calls.map(([event]) => event);
+    expect(events).not.toContain("session_compact");
+    expect(events).not.toContain("session_shutdown");
+  });
+
   it("keeps Codex wrapping and sends only the real Bearer key through the actual request pipeline", async () => {
     const { raw, marker } = slowCommand();
     configure(raw);
