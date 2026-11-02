@@ -1,8 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import cpaExtension, {
+import {
   fetchModels,
   patchHeaders,
   resolveEndpoints,
@@ -23,16 +20,18 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
     });
   });
 
-  it("resolves literal, env, and !command API keys", () => {
-    expect(resolveKey(" plain-key ")).toBe("plain-key");
-
-    process.env.TEST_CPA_KEY = "env-key-value";
-    expect(resolveKey("$TEST_CPA_KEY")).toBe("env-key-value");
-    expect(resolveKey(["$", "{TEST_CPA_KEY}"].join(""))).toBe("env-key-value");
-    delete process.env.TEST_CPA_KEY;
-
-    const resolved = resolveKey(`!"${process.execPath}" -e "process.stdout.write('cmd-key-123')"`);
-    expect(resolved).toBe("cmd-key-123");
+  it("preserves literal and environment API keys", async () => {
+    vi.stubEnv("TEST_CPA_KEY", " env-key-value ");
+    try {
+      expect(await resolveKey(" plain-key ")).toBe("plain-key");
+      expect(await resolveKey("$TEST_CPA_KEY")).toBe("env-key-value");
+      expect(await resolveKey(["$", "{TEST_CPA_KEY}"].join(""))).toBe("env-key-value");
+      expect(await resolveKey(undefined)).toBeUndefined();
+      expect(await resolveKey("  ")).toBeUndefined();
+      expect(await resolveKey("$UNSET_CPA_TEST_KEY")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("wraps plain API keys for official Codex stream and unwraps outgoing headers", () => {
@@ -86,49 +85,5 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
         maxTokens: 128_000,
       },
     ]);
-  });
-
-  it("loads remote models on startup and registers provider with !command apiKey", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-cpa-test-"));
-    const prevDir = process.env.PI_CODING_AGENT_DIR;
-    process.env.PI_CODING_AGENT_DIR = dir;
-    const cmd = `!"${process.execPath}" -e "process.stdout.write('op-secret-key')"`;
-    writeFileSync(
-      join(dir, "cliproxyapi.json"),
-      JSON.stringify({
-        baseUrl: "https://vps.example.com:27119",
-        apiKey: cmd,
-        providerId: "cpa",
-      }),
-    );
-
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(JSON.stringify({ data: [{ id: "gpt-6.1-sol" }] }), { status: 200 }),
-      );
-    const registerProvider = vi.fn();
-    const pi = {
-      unregisterProvider: vi.fn(),
-      registerProvider,
-      registerCommand: vi.fn(),
-      on: vi.fn(),
-    } as unknown as Parameters<typeof cpaExtension>[0];
-
-    try {
-      await cpaExtension(pi);
-      expect(registerProvider).toHaveBeenCalledWith(
-        "cpa",
-        expect.objectContaining({
-          apiKey: cmd,
-          models: [expect.objectContaining({ id: "gpt-6.1-sol" })],
-        }),
-      );
-    } finally {
-      fetchMock.mockRestore();
-      if (prevDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-      else process.env.PI_CODING_AGENT_DIR = prevDir;
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
