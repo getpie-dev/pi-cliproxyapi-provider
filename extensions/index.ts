@@ -156,8 +156,8 @@ export async function fetchModels(
     | { models?: RemoteModelItem[]; data?: RemoteModelItem[] }
     | RemoteModelItem[];
   const list = Array.isArray(data) ? data : (data.models ?? data.data ?? []);
+  // Codex ModelVisibility is "list" | "hide" | "none"; only listed (or unspecified) models show.
   return list
-    // Codex ModelVisibility is "list" | "hide" | "none"; only listed (or unspecified) models show.
     .filter((m) => (m?.visibility ?? "list") === "list" && (m?.slug || m?.id))
     .map((m) => {
       const id = String(m.slug ?? m.id).trim();
