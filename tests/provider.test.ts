@@ -239,6 +239,29 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("rotated-key");
   });
 
+  it("does not let a stale failed run evict the entry started by /reload", async () => {
+    const marker = join(dir, "runs");
+    const script = join(dir, "stale.cjs");
+    writeFileSync(
+      script,
+      `const fs = require("node:fs");
+      fs.appendFileSync(${JSON.stringify(marker)}, "x");
+      if (fs.readFileSync(${JSON.stringify(marker)}, "utf8").length === 1) setTimeout(() => process.exit(1), 100);
+      else setTimeout(() => process.stdout.write("synthetic-key"), 600);`,
+    );
+    configure(`!exec "${process.execPath}" "${script}"`);
+    await cpaExtension(pi);
+    await vi.waitFor(() => expect(existsSync(marker)).toBe(true));
+    const calls = vi.mocked(pi.on).mock.calls as unknown as [string, (event: unknown) => unknown][];
+    calls.find(([event]) => event === "session_start")![1]({
+      type: "session_start",
+      reason: "reload",
+    });
+    await delay(400);
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");
+    expect(readFileSync(marker, "utf8")).toBe("xx");
+  });
+
   it("never falls back to raw commands after failure or empty output, and retries safely", async () => {
     const script = join(dir, "retry.cjs");
     const value = join(dir, "value");

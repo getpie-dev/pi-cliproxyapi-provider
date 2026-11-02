@@ -117,11 +117,12 @@ export async function resolveKey(raw: string | undefined): Promise<string | unde
       child.stdin?.end();
     })
       .then((key) => {
-        if (!key) keyCache.delete(cmd);
+        if (!key && keyCache.get(cmd) === pending) keyCache.delete(cmd);
         return key;
       })
       .catch((error) => {
-        keyCache.delete(cmd);
+        // A stale run must not evict a newer entry started after /reload.
+        if (keyCache.get(cmd) === pending) keyCache.delete(cmd);
         // Child-process errors can contain the command and secret output.
         throw new Error(error.killed ? "API key command timed out" : "API key command failed");
       });
