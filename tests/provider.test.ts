@@ -362,8 +362,12 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
       JSON.stringify({ apiKey: "synthetic-key", baseUrl: url }),
     );
     process.env.CLIPROXYAPI_BASE_URL = url;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await expect(cpaExtension(pi)).resolves.toBeUndefined();
     expect(registerCommand).toHaveBeenCalledTimes(registered ? 1 : 0);
+    expect(warn.mock.calls).toEqual(
+      registered ? [] : [["[cliproxyapi] Invalid base URL; provider not registered."]],
+    );
   });
 
   it("treats a null config file as empty", async () => {

@@ -194,7 +194,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   try {
     endpoints = resolveEndpoints(setting("CLIPROXYAPI_BASE_URL", "baseUrl"));
   } catch {
-    return; // Invalid base URL: skip registration rather than crash extension loading.
+    // Skip registration rather than crash extension loading; never print the URL itself.
+    console.warn("[cliproxyapi] Invalid base URL; provider not registered.");
+    return;
   }
   const { inferenceBaseUrl, modelsUrl } = endpoints;
   const cachePath = join(agentDir, "cliproxyapi-models.json");
