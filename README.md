@@ -10,8 +10,9 @@ Minimal [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) provider ext
 ## Command credentials and rotation
 
 `!command` runs asynchronously and never blocks startup. With a matching cached catalog it starts
-in the background as soon as the extension loads, so the first authenticated request reuses the
-running or finished result; cold model discovery awaits it. Model availability checks never execute it.
+in the background as soon as the extension loads and then refreshes the catalog, so the first
+authenticated request reuses the running or finished result; cold model discovery awaits it. Model
+availability checks never execute it.
 
 Concurrent lookups of the same trimmed command share one execution. Successful, nonempty, trimmed
 output is cached in process memory and reused across `/new`, `/resume` and `/fork`. There is no TTL

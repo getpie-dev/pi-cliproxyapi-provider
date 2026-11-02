@@ -317,12 +317,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       cached.models.length > 0
     ) {
       register(cached.models);
-      // Command keys are prewarmed in the background without blocking startup; others refresh the catalog.
-      if (rawKey.startsWith("!")) {
-        void resolveKey(rawKey).catch(() => {});
-      } else {
-        void refresh().catch(() => {});
-      }
+      // Background refresh; for a command key this also prewarms it without blocking startup.
+      void refresh().catch(() => {});
       return;
     }
   } catch {}

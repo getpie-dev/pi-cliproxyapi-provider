@@ -89,6 +89,28 @@ function slowCommand() {
   return { raw: `!exec "${process.execPath}" "${script}"`, marker };
 }
 
+function gatedCommand() {
+  const script = join(dir, "gated.cjs");
+  const marker = join(dir, "runs");
+  const gate = join(dir, "gate");
+  writeFileSync(
+    script,
+    `const fs = require("node:fs");
+    fs.appendFileSync(${JSON.stringify(marker)}, "x");
+    const timer = setInterval(() => {
+      if (fs.existsSync(${JSON.stringify(gate)})) {
+        clearInterval(timer);
+        process.stdout.write("synthetic-key");
+      }
+    }, 10);`,
+  );
+  return {
+    raw: `!exec "${process.execPath}" "${script}"`,
+    marker,
+    open: () => writeFileSync(gate, ""),
+  };
+}
+
 async function configureConflictingModelsKey() {
   const modelsPath = join(dir, "models.json");
   writeFileSync(modelsPath, JSON.stringify({ providers: { cpa: { apiKey: "models-key" } } }));
@@ -153,18 +175,37 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("models-key");
   });
 
-  it("prewarms a command key at cached startup without awaiting it, then reuses it for auth", async () => {
-    const { raw, marker } = slowCommand();
+  it("prewarms a command key at cached startup without awaiting it, then refreshes the catalog", async () => {
+    const { raw, marker, open } = gatedCommand();
     configure(raw);
-    const started = Date.now();
+    // The command cannot finish until the gate opens, so awaiting it here would hang.
     await cpaExtension(pi);
-    // The command sleeps 350ms; startup must not wait for it.
-    expect(Date.now() - started).toBeLessThan(300);
     await vi.waitFor(() => expect(existsSync(marker)).toBe(true));
     expect(globalThis.fetch).not.toHaveBeenCalled();
+    open();
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");
+    // Background refresh rewrites the cached catalog (cached name "Test" becomes the server id).
+    await vi.waitFor(() =>
+      expect(readFileSync(join(dir, "cliproxyapi-models.json"), "utf8")).toContain(
+        '"name": "test-model"',
+      ),
+    );
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
     expect(readFileSync(marker, "utf8")).toBe("x");
     expect(childProcess.execSync).not.toHaveBeenCalled();
+  });
+
+  it("answers model availability without waiting for or re-running the command", async () => {
+    const { raw, marker, open } = gatedCommand();
+    configure(raw);
+    await cpaExtension(pi);
+    await vi.waitFor(() => expect(existsSync(marker)).toBe(true));
+    await runtime.refresh({ allowNetwork: false });
+    expect(await runtime.getAvailable("cpa")).toHaveLength(1);
+    expect(await runtime.getAvailable("cpa")).toHaveLength(1);
+    expect(readFileSync(marker, "utf8")).toBe("x");
+    open();
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");
   });
 
   it("keeps cached startup and model availability non-blocking, then authenticates asynchronously", async () => {
@@ -174,7 +215,6 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     await runtime.refresh({ allowNetwork: false });
     expect(runtime.getModel("cpa", "test-model")).toBeDefined();
     expect(await runtime.getAvailable("cpa")).toHaveLength(1);
-    expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(runtime.getRegisteredProviderConfig("cpa")).toBeUndefined();
 
     let settled = false;
@@ -375,12 +415,15 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     });
     const model = runtime.getModel("cpa", "test-model")! as Model<"openai-codex-responses">;
     const pending = runtime.streamSimple(model, { messages: [] }, { transport: "sse" }).result();
+    // Ignore the background catalog refresh; count only inference requests.
+    const inferenceCalls = () =>
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/backend-api/"));
     await delay(25);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(inferenceCalls()).toHaveLength(0);
     const result = await pending;
     expect(result.errorMessage).toBeUndefined();
     expect(result.stopReason).toBe("stop");
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(inferenceCalls()).toHaveLength(1);
     // The explicit full-stream path uses the same wrapper as the legacy provider did.
     expect(
       (await runtime.stream(model, { messages: [] }, { transport: "sse" }).result()).stopReason,
