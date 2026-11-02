@@ -139,7 +139,10 @@ export async function fetchModels(
   apiKey: string,
   fetchImpl = globalThis.fetch,
 ): Promise<ProviderModelConfig[]> {
-  const res = await fetchImpl(modelsUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+  const res = await fetchImpl(modelsUrl, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!res.ok) throw new Error(`models HTTP ${res.status}`);
   const data = (await res.json()) as
     | { models?: RemoteModelItem[]; data?: RemoteModelItem[] }

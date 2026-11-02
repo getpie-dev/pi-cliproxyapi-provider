@@ -118,4 +118,19 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
       ["off", "low", "medium", "high", "xhigh"],
     );
   });
+  it("aborts model discovery after ten seconds", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(AbortSignal.abort());
+    try {
+      const hang = ((_url, init) =>
+        new Promise((_resolve, reject) => {
+          if (init?.signal?.aborted) reject(init.signal.reason);
+        })) as typeof fetch;
+      await expect(
+        fetchModels("https://cpa.example.invalid/v1/models", "k", hang),
+      ).rejects.toThrow();
+      expect(timeout).toHaveBeenCalledWith(10_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  }, 1_000);
 });
