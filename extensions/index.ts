@@ -124,10 +124,9 @@ export async function resolveKey(raw: string | undefined): Promise<string | unde
   return env ? process.env[env]?.trim() || undefined : s;
 }
 
-export function resolveEndpoints(baseUrl = "http://127.0.0.1:8317") {
-  const url = new URL(
-    /^https?:\/\//i.test(baseUrl.trim()) ? baseUrl.trim() : `http://${baseUrl.trim()}`,
-  );
+export function resolveEndpoints(baseUrl?: string) {
+  const s = baseUrl?.trim() || "http://127.0.0.1:8317";
+  const url = new URL(/^https?:\/\//i.test(s) ? s : `http://${s}`);
   const root = url.pathname.replace(/\/+$/, "").replace(/\/(?:v1|backend-api)$/, "");
   return {
     inferenceBaseUrl: `${url.origin}${root}/backend-api/`,
@@ -200,9 +199,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const rawKey = String(process.env.CLIPROXYAPI_API_KEY ?? cfg.apiKey ?? "").trim();
   if (!rawKey) return;
 
-  const { inferenceBaseUrl, modelsUrl } = resolveEndpoints(
-    process.env.CLIPROXYAPI_BASE_URL ?? cfg.baseUrl,
-  );
+  let endpoints: ReturnType<typeof resolveEndpoints>;
+  try {
+    endpoints = resolveEndpoints(process.env.CLIPROXYAPI_BASE_URL ?? cfg.baseUrl);
+  } catch {
+    return; // Invalid base URL: skip registration rather than crash extension loading.
+  }
+  const { inferenceBaseUrl, modelsUrl } = endpoints;
   const cachePath = join(agentDir, "cliproxyapi-models.json");
 
   const streamSimple: ProviderStreams["streamSimple"] = (model, context, options) => {
