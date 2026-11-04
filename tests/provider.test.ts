@@ -436,4 +436,42 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect(readFileSync(marker, "utf8")).toBe("x");
     expect(childProcess.execSync).not.toHaveBeenCalled();
   });
+
+  it("falls back to SSE with the real key when the WebSocket global is read-only", async () => {
+    configure("synthetic-key");
+    await cpaExtension(pi);
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
+    const constructed = vi.fn();
+    const ReadOnly = class {
+      constructor() {
+        constructed();
+        throw new Error("unpatched WebSocket used");
+      }
+    };
+    Object.defineProperty(globalThis, "WebSocket", {
+      value: ReadOnly,
+      writable: false,
+      configurable: true,
+    });
+    try {
+      vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) => {
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-key");
+        return new Response(
+          'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+      const model = runtime.getModel("cpa", "test-model")! as Model<"openai-codex-responses">;
+      // No transport option: Pi's default "auto" would try a WebSocket first, on every request.
+      for (const sessionId of ["s1", "s2"]) {
+        const result = await runtime.streamSimple(model, { messages: [] }, { sessionId }).result();
+        expect(result.errorMessage).toBeUndefined();
+        expect(result.stopReason).toBe("stop");
+      }
+      expect(constructed).not.toHaveBeenCalled();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "WebSocket", descriptor);
+      else delete (globalThis as { WebSocket?: unknown }).WebSocket;
+    }
+  });
 });

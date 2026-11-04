@@ -158,4 +158,22 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
       globalThis.WebSocket = original;
     }
   });
+  it("reports a read-only WebSocket global (bun compile) instead of throwing", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
+    const ReadOnly = class {} as unknown as typeof WebSocket;
+    Object.defineProperty(globalThis, "WebSocket", {
+      value: ReadOnly,
+      writable: false,
+      configurable: true,
+    });
+    try {
+      // Every request asks again; a failed attempt must not mark the native class as patched.
+      expect(ensureWsPatch()).toBe(false);
+      expect(ensureWsPatch()).toBe(false);
+      expect(globalThis.WebSocket).toBe(ReadOnly);
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "WebSocket", descriptor);
+      else delete (globalThis as { WebSocket?: unknown }).WebSocket;
+    }
+  });
 });

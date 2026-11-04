@@ -59,10 +59,14 @@ export function patchHeaders(headers: Headers): boolean {
   return true;
 }
 
-export function ensureWsPatch(): void {
+/** Returns whether Pi's WebSockets will carry the real key; false where globals are read-only. */
+export function ensureWsPatch(): boolean {
   const ws = globalThis.WebSocket as (typeof WebSocket & { [WS_PATCHED]?: boolean }) | undefined;
-  if (typeof ws !== "function" || ws[WS_PATCHED]) return;
+  if (typeof ws !== "function") return false;
+  if (ws[WS_PATCHED]) return true;
   const Patched = new Proxy(ws, {
+    // A marker set on the Proxy would land on the native class, which stays global if assignment fails.
+    get: (target, key) => key === WS_PATCHED || Reflect.get(target, key),
     construct(target, args, newTarget) {
       const init = args[1] && typeof args[1] === "object" ? args[1].headers : undefined;
       let headers: Headers | undefined;
@@ -75,9 +79,14 @@ export function ensureWsPatch(): void {
       }
       return Reflect.construct(target, args, newTarget);
     },
-  }) as typeof WebSocket & { [WS_PATCHED]?: boolean };
-  Patched[WS_PATCHED] = true;
-  globalThis.WebSocket = Patched;
+  });
+  try {
+    // bun compile makes built-ins read-only for code loaded at runtime and throws here.
+    globalThis.WebSocket = Patched;
+  } catch {
+    return false;
+  }
+  return globalThis.WebSocket === Patched;
 }
 
 export async function resolveKey(raw: string | undefined): Promise<string | undefined> {
@@ -202,12 +211,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const cachePath = join(agentDir, "cliproxyapi-models.json");
 
   const streamSimple: ProviderStreams["streamSimple"] = (model, context, options) => {
-    ensureWsPatch();
+    // Without the patch a WebSocket would send the wrapped key, so use SSE (via our fetch) instead.
+    const wsReady = ensureWsPatch();
     return codexApi.streamSimple(
       model as Model<"openai-codex-responses">,
       normalizeContext(context),
       {
         ...options,
+        ...(!wsReady && { transport: "sse" as const }),
         ...(options?.apiKey ? { apiKey: wrapKey(options.apiKey) } : {}),
         fetch: async (input, init) => {
           if (init?.headers) {
