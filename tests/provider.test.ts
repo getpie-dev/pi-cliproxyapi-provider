@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { InMemoryCredentialStore, InMemoryModelsStore, type Model } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import cpaExtension, { resolveEndpoints, resolveKey } from "../extensions/index.ts";
+import cpaExtension, { resolveEndpoints, resolveKey, wrapKey } from "../extensions/index.ts";
 
 let dir: string;
 let previousEnv: NodeJS.ProcessEnv;
@@ -402,14 +402,14 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("synthetic-key");
   });
 
-  it("keeps Codex wrapping and sends only the real Bearer key through the actual request pipeline", async () => {
+  it("keeps Codex wrapping and sends the real key as X-Api-Key through the actual request pipeline", async () => {
     const { raw, marker } = slowCommand();
     configure(raw);
     await cpaExtension(pi);
     const fetchMock = vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) => {
       const headers = new Headers(init?.headers);
-      expect(headers.get("authorization")).toBe("Bearer synthetic-key");
-      expect(headers.get("chatgpt-account-id")).toBeNull();
+      expect(headers.get("authorization")).toBe(`Bearer ${wrapKey("synthetic-key")}`);
+      expect(headers.get("x-api-key")).toBe("synthetic-key");
       return new Response(
         'data: {"type":"response.completed","response":{"id":"test-response","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n',
         {
@@ -437,38 +437,48 @@ describe("native Pi authentication integration (locked Pi 1.3.0)", () => {
     expect(childProcess.execSync).not.toHaveBeenCalled();
   });
 
-  it("falls back to SSE with the real key when the WebSocket global is read-only", async () => {
+  it("sends X-Api-Key on both WebSocket and SSE without modifying globals", async () => {
     configure("synthetic-key");
     await cpaExtension(pi);
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
-    const constructed = vi.fn();
-    const ReadOnly = class {
-      constructor() {
-        constructed();
-        throw new Error("unpatched WebSocket used");
+    const fetchBefore = globalThis.fetch;
+    const wsHeaders: Record<string, string>[] = [];
+    // Records the handshake headers, then fails so Pi falls back to SSE in the same request.
+    class FakeWebSocket extends EventTarget {
+      constructor(_url: string, init: { headers: Record<string, string> }) {
+        super();
+        wsHeaders.push(init.headers);
+        setTimeout(() => this.dispatchEvent(new Event("error")));
       }
-    };
+      close() {}
+    }
+    // Read-only, like bun compile: any assignment by the extension would throw.
     Object.defineProperty(globalThis, "WebSocket", {
-      value: ReadOnly,
+      value: FakeWebSocket,
       writable: false,
       configurable: true,
     });
     try {
+      const sseHeaders: Headers[] = [];
       vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) => {
-        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-key");
+        sseHeaders.push(new Headers(init?.headers));
         return new Response(
           'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n',
           { headers: { "content-type": "text/event-stream" } },
         );
       });
       const model = runtime.getModel("cpa", "test-model")! as Model<"openai-codex-responses">;
-      // No transport option: Pi's default "auto" would try a WebSocket first, on every request.
-      for (const sessionId of ["s1", "s2"]) {
-        const result = await runtime.streamSimple(model, { messages: [] }, { sessionId }).result();
-        expect(result.errorMessage).toBeUndefined();
-        expect(result.stopReason).toBe("stop");
-      }
-      expect(constructed).not.toHaveBeenCalled();
+      const result = await runtime
+        .streamSimple(model, { messages: [] }, { transport: "websocket" })
+        .result();
+      expect(result.errorMessage).toBeUndefined();
+      expect(result.stopReason).toBe("stop");
+      expect(wsHeaders).toHaveLength(1);
+      expect(new Headers(wsHeaders[0]).get("x-api-key")).toBe("synthetic-key");
+      expect(sseHeaders).toHaveLength(1);
+      expect(sseHeaders[0]!.get("x-api-key")).toBe("synthetic-key");
+      expect(globalThis.WebSocket).toBe(FakeWebSocket);
+      expect(globalThis.fetch).toBe(fetchBefore);
     } finally {
       if (descriptor) Object.defineProperty(globalThis, "WebSocket", descriptor);
       else delete (globalThis as { WebSocket?: unknown }).WebSocket;

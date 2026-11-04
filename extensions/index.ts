@@ -17,7 +17,6 @@ import {
 const JWT_CLAIM = Buffer.from(
   JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "cpa" } }),
 ).toString("base64url");
-const WS_PATCHED = Symbol.for("@getpie/pi-cliproxyapi-provider.ws");
 const codexApi = openAICodexResponsesApi();
 const KEY_CACHE = Symbol.for("@getpie/pi-cliproxyapi-provider.keys");
 const processState = globalThis as typeof globalThis & {
@@ -44,50 +43,6 @@ export interface RemoteModelItem {
 
 export const wrapKey = (key: string) =>
   `cpa_v1.${JWT_CLAIM}.${Buffer.from(key, "utf8").toString("base64url")}`;
-
-export function unwrapAuth(value: string | null | undefined): string | undefined {
-  const m = value?.match(/^Bearer\s+cpa_v1\.[^.]+\.([A-Za-z0-9_-]+)$/i);
-  return m?.[1] ? `Bearer ${Buffer.from(m[1], "base64url").toString("utf8")}` : undefined;
-}
-
-/** Replaces our wrapped key with the real one; returns whether anything was rewritten. */
-export function patchHeaders(headers: Headers): boolean {
-  const real = unwrapAuth(headers.get("authorization"));
-  if (!real) return false;
-  headers.set("authorization", real);
-  headers.delete("chatgpt-account-id");
-  return true;
-}
-
-/** Returns whether Pi's WebSockets will carry the real key; false where globals are read-only. */
-export function ensureWsPatch(): boolean {
-  const ws = globalThis.WebSocket as (typeof WebSocket & { [WS_PATCHED]?: boolean }) | undefined;
-  if (typeof ws !== "function") return false;
-  if (ws[WS_PATCHED]) return true;
-  const Patched = new Proxy(ws, {
-    // A marker set on the Proxy would land on the native class, which stays global if assignment fails.
-    get: (target, key) => key === WS_PATCHED || Reflect.get(target, key),
-    construct(target, args, newTarget) {
-      const init = args[1] && typeof args[1] === "object" ? args[1].headers : undefined;
-      let headers: Headers | undefined;
-      try {
-        headers = init ? new Headers(init) : undefined;
-      } catch {}
-      // Only rewrite our own wrapped key (Pi passes a plain object); other WebSockets are untouched.
-      if (headers && patchHeaders(headers)) {
-        args = [args[0], { ...args[1], headers: Object.fromEntries(headers) }, ...args.slice(2)];
-      }
-      return Reflect.construct(target, args, newTarget);
-    },
-  });
-  try {
-    // bun compile makes built-ins read-only for code loaded at runtime and throws here.
-    globalThis.WebSocket = Patched;
-  } catch {
-    return false;
-  }
-  return globalThis.WebSocket === Patched;
-}
 
 export async function resolveKey(raw: string | undefined): Promise<string | undefined> {
   const s = raw?.trim();
@@ -210,27 +165,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const { inferenceBaseUrl, modelsUrl } = endpoints;
   const cachePath = join(agentDir, "cliproxyapi-models.json");
 
-  const streamSimple: ProviderStreams["streamSimple"] = (model, context, options) => {
-    // Without the patch a WebSocket would send the wrapped key, so use SSE (via our fetch) instead.
-    const wsReady = ensureWsPatch();
-    return codexApi.streamSimple(
-      model as Model<"openai-codex-responses">,
-      normalizeContext(context),
-      {
-        ...options,
-        ...(!wsReady && { transport: "sse" as const }),
-        ...(options?.apiKey ? { apiKey: wrapKey(options.apiKey) } : {}),
-        fetch: async (input, init) => {
-          if (init?.headers) {
-            const headers = new Headers(init.headers);
-            patchHeaders(headers);
-            init = { ...init, headers };
-          }
-          return (options?.fetch ?? globalThis.fetch)(input, init);
-        },
-      },
-    );
-  };
+  // The Codex transport needs a JWT-shaped token for the account id, so Authorization carries the
+  // wrapped key; CLIProxyAPI skips it and accepts the real key from X-Api-Key on SSE and WebSocket.
+  const streamSimple: ProviderStreams["streamSimple"] = (model, context, options) =>
+    codexApi.streamSimple(model as Model<"openai-codex-responses">, normalizeContext(context), {
+      ...options,
+      ...(options?.apiKey && {
+        apiKey: wrapKey(options.apiKey),
+        headers: { ...options.headers, "X-Api-Key": options.apiKey },
+      }),
+    });
 
   const register = (models: ProviderModelConfig[]) => {
     pi.unregisterProvider(providerId);

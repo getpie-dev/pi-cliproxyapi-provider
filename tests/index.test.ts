@@ -1,14 +1,6 @@
 import { getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import {
-  ensureWsPatch,
-  fetchModels,
-  patchHeaders,
-  resolveEndpoints,
-  resolveKey,
-  unwrapAuth,
-  wrapKey,
-} from "../extensions/index.ts";
+import { fetchModels, resolveEndpoints, resolveKey, wrapKey } from "../extensions/index.ts";
 
 describe("@getpie/pi-cliproxyapi-provider", () => {
   it("normalizes endpoints for host:port, /v1, and /backend-api", () => {
@@ -36,19 +28,12 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
     }
   });
 
-  it("wraps plain API keys for official Codex stream and unwraps outgoing headers", () => {
-    const rawKey = "+UqaZ55q4CGI0P2+6nQj6Zfdb3pj1NGk";
-    const wrapped = wrapKey(rawKey);
-    expect(wrapped.split(".")).toHaveLength(3);
-    expect(unwrapAuth(`Bearer ${wrapped}`)).toBe(`Bearer ${rawKey}`);
-
-    const headers = new Headers({
-      Authorization: `Bearer ${wrapped}`,
-      "chatgpt-account-id": "cpa",
+  it("wraps API keys in a JWT-shaped token carrying the cpa account id", () => {
+    const parts = wrapKey("+UqaZ55q4CGI0P2+6nQj6Zfdb3pj1NGk").split(".");
+    expect(parts).toHaveLength(3);
+    expect(JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8"))).toEqual({
+      "https://api.openai.com/auth": { chatgpt_account_id: "cpa" },
     });
-    patchHeaders(headers);
-    expect(headers.get("authorization")).toBe(`Bearer ${rawKey}`);
-    expect(headers.get("chatgpt-account-id")).toBeNull();
   });
 
   it("fetches and maps remote catalog entries", async () => {
@@ -135,45 +120,4 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
       timeout.mockRestore();
     }
   }, 1_000);
-  it("rewrites only WebSockets carrying a wrapped key, including tuple headers, to a plain object", () => {
-    const original = globalThis.WebSocket;
-    const calls: unknown[][] = [];
-    globalThis.WebSocket = class {
-      constructor(...args: unknown[]) {
-        calls.push(args);
-      }
-    } as unknown as typeof WebSocket;
-    try {
-      ensureWsPatch();
-      const unrelated = { headers: [["x-other", "1"]] };
-      new globalThis.WebSocket("ws://a", unrelated as never);
-      expect(calls[0]![1]).toBe(unrelated);
-      const headers = [
-        ["Authorization", `Bearer ${wrapKey("real-key")}`],
-        ["chatgpt-account-id", "cpa"],
-      ];
-      new globalThis.WebSocket("ws://b", { headers } as never);
-      expect(calls[1]![1]).toEqual({ headers: { authorization: "Bearer real-key" } });
-    } finally {
-      globalThis.WebSocket = original;
-    }
-  });
-  it("reports a read-only WebSocket global (bun compile) instead of throwing", () => {
-    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
-    const ReadOnly = class {} as unknown as typeof WebSocket;
-    Object.defineProperty(globalThis, "WebSocket", {
-      value: ReadOnly,
-      writable: false,
-      configurable: true,
-    });
-    try {
-      // Every request asks again; a failed attempt must not mark the native class as patched.
-      expect(ensureWsPatch()).toBe(false);
-      expect(ensureWsPatch()).toBe(false);
-      expect(globalThis.WebSocket).toBe(ReadOnly);
-    } finally {
-      if (descriptor) Object.defineProperty(globalThis, "WebSocket", descriptor);
-      else delete (globalThis as { WebSocket?: unknown }).WebSocket;
-    }
-  });
 });
