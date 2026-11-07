@@ -187,6 +187,8 @@ describe("per-endpoint protocols", () => {
       expect(request.headers.get("authorization")).toBeNull();
       expect(request.headers.get("chatgpt-account-id")).toBeNull();
       expect(request.headers.get("anthropic-version")).toBe("2023-06-01");
+      expect(request.headers.get("content-type")).toBe("application/json");
+      expect(request.headers.get("accept")).toBe("application/json");
       expect(request.body).toMatchObject({
         model: "glm-test",
         stream: true,
@@ -285,6 +287,8 @@ describe("per-endpoint protocols", () => {
       expect(inference[index]!.headers.get("x-api-key")).toBe(key);
       expect(inference[index]!.headers.get("authorization")).toBeNull();
       expect(inference[index]!.headers.get("chatgpt-account-id")).toBeNull();
+      expect(inference[index]!.headers.get("content-type")).toBe("application/json");
+      expect(inference[index]!.headers.get("accept")).toBe("application/json");
       expect(inference[index]!.body.thinking).toMatchObject({ type: "enabled" });
     }
     expect(await refreshCatalog()).toHaveBeenCalledWith(
