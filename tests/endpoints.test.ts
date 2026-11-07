@@ -1,4 +1,5 @@
 import childProcess from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ const SSE =
   'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n';
 
 function catalogCache(providerId: string) {
-  return `cliproxyapi-models.${Buffer.from(providerId).toString("base64url")}.json`;
+  return `cliproxyapi-models.${createHash("sha256").update(providerId).digest("hex")}.json`;
 }
 
 beforeEach(async () => {
@@ -213,7 +214,7 @@ const timer = setInterval(() => {
     expect(readFileSync(work.marker, "utf8")).toBe("x");
   });
 
-  it("lets the later entry replace an earlier one with the same provider id", async () => {
+  it("skips an exact duplicate provider id and keeps the first entry", async () => {
     writeConfig([
       { providerId: "cpa-a", apiKey: "key-a", baseUrl: "https://a.example" },
       { providerId: "cpa-a", apiKey: "key-b", baseUrl: "https://b.example" },
@@ -223,15 +224,15 @@ const timer = setInterval(() => {
     await cpaExtension(pi);
     expect(warn.mock.calls).toEqual([
       [
-        '[cliproxyapi] Provider id "cpa-a" is configured more than once; the later endpoint replaces it.',
+        '[cliproxyapi] Provider id "cpa-a" is configured more than once; the duplicate was skipped.',
       ],
     ]);
-    expect((await runtime.getAuth("cpa-a"))?.auth.apiKey).toBe("key-b");
-    expect(runtime.getModel("cpa-a", "model-a")).toBeUndefined();
-    expect(runtime.getModel("cpa-a", "model-b")?.baseUrl).toBe("https://b.example/backend-api/");
+    expect((await runtime.getAuth("cpa-a"))?.auth.apiKey).toBe("key-a");
+    expect(runtime.getModel("cpa-a", "model-a")?.baseUrl).toBe("https://a.example/backend-api/");
+    expect(runtime.getModel("cpa-a", "model-b")).toBeUndefined();
     expect((await runtime.getAuth("cpa-b"))?.auth.apiKey).toBe("key-c");
     expect(vi.mocked(globalThis.fetch).mock.calls.map(([url]) => String(url))).toEqual([
-      resolveEndpoints("https://b.example").modelsUrl,
+      resolveEndpoints("https://a.example").modelsUrl,
       resolveEndpoints("https://c.example").modelsUrl,
     ]);
   });
@@ -273,14 +274,14 @@ const timer = setInterval(() => {
     await cpaExtension(pi);
     expect(warn.mock.calls).toEqual([
       [
-        '[cliproxyapi] Provider id "env-id" is configured more than once; the later endpoint replaces it.',
+        '[cliproxyapi] Provider id "env-id" is configured more than once; the duplicate was skipped.',
       ],
     ]);
     expect(runtime.getRegisteredNativeProvider("cpa-a")).toBeUndefined();
     expect(runtime.getRegisteredNativeProvider("cpa-b")).toBeUndefined();
-    expect(runtime.getRegisteredNativeProvider("env-id")?.name).toBe("Work");
-    expect((await runtime.getAuth("env-id"))?.auth.apiKey).toBe("key-b");
-    expect(runtime.getModel("env-id", "model-b")?.baseUrl).toBe("https://b.example/backend-api/");
+    expect(runtime.getRegisteredNativeProvider("env-id")?.name).toBe("env-id");
+    expect((await runtime.getAuth("env-id"))?.auth.apiKey).toBe("key-a");
+    expect(runtime.getModel("env-id", "model-a")?.baseUrl).toBe("https://a.example/backend-api/");
   });
 
   it("skips one invalid endpoint without dropping its sibling", async () => {

@@ -1,4 +1,5 @@
 import { exec } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
@@ -108,43 +109,39 @@ export function resolveEndpoints(baseUrl?: string) {
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function readEntry(entry: unknown, env: NodeJS.ProcessEnv): EndpointConfig | undefined {
-  const cfg = isRecord(entry) ? entry : {};
-  // Empty env or config values count as unset. Env wins, for an object and for every array entry.
-  const setting = (name: string, key: string) =>
-    env[name]?.trim() || String(cfg[key] ?? "").trim() || undefined;
-  const rawKey = setting("CLIPROXYAPI_API_KEY", "apiKey");
-  if (!rawKey) return undefined;
-  const providerId = setting("CLIPROXYAPI_PROVIDER_ID", "providerId") ?? "cpa";
-  return {
-    providerId,
-    providerName: setting("CLIPROXYAPI_PROVIDER_NAME", "providerName") ?? providerId,
-    rawKey,
-    baseUrl: setting("CLIPROXYAPI_BASE_URL", "baseUrl"),
-  };
-}
-
 export function loadEndpoints(
   config: unknown,
   env: NodeJS.ProcessEnv,
 ): { endpoints: EndpointConfig[]; warnings: string[] } {
   const warnings: string[] = [];
-  const byId = new Map<string, EndpointConfig>();
+  const endpoints: EndpointConfig[] = [];
+  const seen = new Set<string>();
+  // An object is one entry. Every entry uses the same defaults, coercion, and env precedence.
   for (const entry of Array.isArray(config) ? config : [config]) {
-    const ep = readEntry(entry, env);
-    if (!ep) continue;
-    if (byId.has(ep.providerId)) {
+    const cfg =
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? (entry as Record<string, unknown>)
+        : {};
+    const setting = (name: string, key: string) =>
+      env[name]?.trim() || String(cfg[key] ?? "").trim() || undefined;
+    const rawKey = setting("CLIPROXYAPI_API_KEY", "apiKey");
+    if (!rawKey) continue;
+    const providerId = setting("CLIPROXYAPI_PROVIDER_ID", "providerId") ?? "cpa";
+    if (seen.has(providerId)) {
       warnings.push(
-        `[cliproxyapi] Provider id ${JSON.stringify(ep.providerId)} is configured more than once; the later endpoint replaces it.`,
+        `[cliproxyapi] Provider id ${JSON.stringify(providerId)} is configured more than once; the duplicate was skipped.`,
       );
+      continue;
     }
-    byId.set(ep.providerId, ep);
+    seen.add(providerId);
+    endpoints.push({
+      providerId,
+      providerName: setting("CLIPROXYAPI_PROVIDER_NAME", "providerName") ?? providerId,
+      rawKey,
+      baseUrl: setting("CLIPROXYAPI_BASE_URL", "baseUrl"),
+    });
   }
-  return { endpoints: [...byId.values()], warnings };
+  return { endpoints, warnings };
 }
 
 export async function fetchModels(
@@ -320,7 +317,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           accountId: alone ? "cpa" : ep.providerId.replace(/[\r\n]/g, "") || "cpa",
           cacheFile: alone
             ? LEGACY_CACHE_FILE
-            : `cliproxyapi-models.${Buffer.from(ep.providerId).toString("base64url")}.json`,
+            : `cliproxyapi-models.${createHash("sha256").update(ep.providerId).digest("hex")}.json`,
         },
         urls,
       ),

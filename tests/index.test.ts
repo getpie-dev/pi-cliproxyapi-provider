@@ -134,51 +134,39 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
 });
 
 describe("endpoint configuration", () => {
-  it("treats one object and a one-element array the same, including env overrides", () => {
-    const config = {
-      apiKey: "file-key",
-      baseUrl: "https://file.example",
-      providerId: "file-id",
-      providerName: "File",
-    };
-    const env = {
-      CLIPROXYAPI_API_KEY: " env-key ",
-      CLIPROXYAPI_BASE_URL: " ",
-      CLIPROXYAPI_PROVIDER_ID: "env-id",
-    };
-    const expected = {
-      warnings: [],
-      endpoints: [
-        {
-          providerId: "env-id",
-          providerName: "File",
-          rawKey: "env-key",
+  it("uses the same defaults, coercion, and env overrides for an object and [object]", () => {
+    const cases: Array<{ config: Record<string, unknown> | null; env: NodeJS.ProcessEnv }> = [
+      { config: { apiKey: "file-key" }, env: {} },
+      { config: { apiKey: 123, providerId: "  ", providerName: "", baseUrl: "" }, env: {} },
+      {
+        config: {
+          apiKey: "file-key",
           baseUrl: "https://file.example",
+          providerId: "file-id",
+          providerName: "File",
         },
-      ],
-    };
-    expect(loadEndpoints(config, env)).toEqual(expected);
-    expect(loadEndpoints([config], env)).toEqual(expected);
-    expect(loadEndpoints({ apiKey: 123 }, {}).endpoints[0]).toMatchObject({
-      providerId: "cpa",
-      providerName: "cpa",
-      rawKey: "123",
-    });
-    expect(loadEndpoints(null, {})).toEqual({ endpoints: [], warnings: [] });
+        env: {
+          CLIPROXYAPI_API_KEY: " env-key ",
+          CLIPROXYAPI_BASE_URL: " ",
+          CLIPROXYAPI_PROVIDER_ID: "env-id",
+          CLIPROXYAPI_PROVIDER_NAME: " Env ",
+        },
+      },
+      {
+        config: null,
+        env: { CLIPROXYAPI_API_KEY: "env-key", CLIPROXYAPI_BASE_URL: "https://env.example" },
+      },
+    ];
+    for (const { config, env } of cases) {
+      expect(loadEndpoints([config], env)).toEqual(loadEndpoints(config, env));
+    }
+    expect(loadEndpoints({ apiKey: "k" }, {}).endpoints).toEqual([
+      { providerId: "cpa", providerName: "cpa", rawKey: "k", baseUrl: undefined },
+    ]);
+    expect(loadEndpoints([{ apiKey: 123 }], {}).endpoints[0]?.rawKey).toBe("123");
     expect(loadEndpoints([], { CLIPROXYAPI_API_KEY: "env-key" })).toEqual({
       endpoints: [],
       warnings: [],
-    });
-    expect(loadEndpoints(config, {})).toEqual({
-      warnings: [],
-      endpoints: [
-        {
-          providerId: "file-id",
-          providerName: "File",
-          rawKey: "file-key",
-          baseUrl: "https://file.example",
-        },
-      ],
     });
   });
 
@@ -215,9 +203,9 @@ describe("endpoint configuration", () => {
     });
   });
 
-  it("keeps the later entry when provider ids collide, including the default id", () => {
-    const replaced =
-      '[cliproxyapi] Provider id "cpa" is configured more than once; the later endpoint replaces it.';
+  it("skips an exact duplicate id and keeps the first, including when env forces one id", () => {
+    const skipped = (id: string) =>
+      `[cliproxyapi] Provider id ${JSON.stringify(id)} is configured more than once; the duplicate was skipped.`;
     expect(
       loadEndpoints(
         [
@@ -233,15 +221,10 @@ describe("endpoint configuration", () => {
         { CLIPROXYAPI_PROVIDER_ID: "" },
       ),
     ).toEqual({
-      warnings: [replaced],
+      warnings: [skipped("cpa")],
       endpoints: [
-        {
-          providerId: "cpa",
-          providerName: "Later",
-          rawKey: "second",
-          baseUrl: "https://b.example",
-        },
-        { providerId: "CPA", providerName: "CPA", rawKey: "other" },
+        { providerId: "cpa", providerName: "cpa", rawKey: "first", baseUrl: "https://a.example" },
+        { providerId: "CPA", providerName: "CPA", rawKey: "other", baseUrl: undefined },
       ],
     });
     expect(
@@ -253,15 +236,13 @@ describe("endpoint configuration", () => {
         { CLIPROXYAPI_PROVIDER_ID: "env-id" },
       ),
     ).toEqual({
-      warnings: [
-        '[cliproxyapi] Provider id "env-id" is configured more than once; the later endpoint replaces it.',
-      ],
+      warnings: [skipped("env-id")],
       endpoints: [
         {
           providerId: "env-id",
           providerName: "env-id",
-          rawKey: "second",
-          baseUrl: "https://b.example",
+          rawKey: "first",
+          baseUrl: "https://a.example",
         },
       ],
     });

@@ -50,13 +50,15 @@ pi install git:github.com/getpie-dev/pi-cliproxyapi-provider
 The file may instead be an array of those same objects. Each entry is registered as its own Pi provider.
 Pi selects the provider. There is no load balancing, failover, or extra selector.
 
-Use a distinct `providerId` for each entry (the default is `cpa`). Entries that resolve to the same id are
-one provider, and the later entry replaces the earlier one. `CLIPROXYAPI_API_KEY`, `CLIPROXYAPI_BASE_URL`,
-`CLIPROXYAPI_PROVIDER_ID`, and `CLIPROXYAPI_PROVIDER_NAME` override that field on every entry. A single
-provider keeps the WebSocket account id `cpa` and `cliproxyapi-models.json`. With more than one provider,
-each id is also its WebSocket account id and each catalog is cached on its own, because Pi caches those
-sockets by session and account id rather than URL. `/cliproxyapi-refresh` refreshes every provider.
-`/reload` re-runs each `!command` on its own. Identical command strings still share one in-process result.
+Use a distinct `providerId` for each entry (the default is `cpa`). A repeated id is skipped after a
+warning, and the first entry is kept. `CLIPROXYAPI_API_KEY`, `CLIPROXYAPI_BASE_URL`,
+`CLIPROXYAPI_PROVIDER_ID`, and `CLIPROXYAPI_PROVIDER_NAME` override that field on every entry, same as
+on one object. `CLIPROXYAPI_PROVIDER_ID` therefore applies to every entry and can make them conflict.
+A single provider keeps the WebSocket account id `cpa` and `cliproxyapi-models.json`. With more than one
+provider, each id is also its WebSocket account id and each catalog is cached in its own digested filename,
+because Pi caches those sockets by session and account id rather than URL. `/cliproxyapi-refresh` refreshes
+every provider. `/reload` re-runs each `!command` on its own. Identical command strings still share one
+in-process result.
 
 ```json
 [
