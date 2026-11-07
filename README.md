@@ -4,7 +4,7 @@ Minimal [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) provider ext
 
 - Uses official `@earendil-works/pi-ai` `openAICodexResponsesApi()` for persistent WebSocket + `previous_response_id` continuation (zero filesystem path probing or source patching).
 - Supports `!command` (e.g. `!op read op://...`) and `$ENV_VAR` in `~/.pi/agent/cliproxyapi.json`.
-- Discovers models from `{baseUrl}/v1/models?client_version=pi` and caches them under `~/.pi/agent/` (`cliproxyapi-models.json` for one object, `cliproxyapi-models.<providerId>.json` for each array entry).
+- Discovers models from `{baseUrl}/v1/models?client_version=pi` and caches them under `~/.pi/agent/`. One provider keeps `cliproxyapi-models.json`; each provider in a multi-provider config has its own cache file.
 - Uses Pi native asynchronous provider authentication (verified against Pi 1.3.0).
 
 ## Command credentials and rotation
@@ -23,7 +23,7 @@ resolved command output to disk. Failures, ten-second timeouts, and empty output
 so the next lookup can retry. Command errors do not expose the command or its output.
 
 Literal keys and `$NAME` / `${NAME}` environment references retain their existing behavior.
-A non-empty `CLIPROXYAPI_API_KEY` overrides a single-object `cliproxyapi.json`. An array ignores `CLIPROXYAPI_*` overrides; see below.
+A non-empty `CLIPROXYAPI_API_KEY` overrides `cliproxyapi.json`, including every entry of an array.
 For the same provider, request keys, runtime keys, and stored credentials outrank a `models.json` credential, and that file outranks the extension credential.
 
 ## Install
@@ -47,18 +47,16 @@ pi install git:github.com/getpie-dev/pi-cliproxyapi-provider
 
 ## Multiple endpoints
 
-The file may instead be an array. Each entry is its own Pi provider. There is no load balancing or failover.
-`providerId` is required. It must be unique ignoring case, 1–64 characters, starting with a letter or digit,
-then letters, digits, `.`, `_`, or `-`. Select that id in Pi. It is also the WebSocket account id, because Pi
-caches Codex sockets by session and account id rather than URL. A single object keeps the account id `cpa`.
+The file may instead be an array of those same objects. Each entry is registered as its own Pi provider.
+Pi selects the provider. There is no load balancing, failover, or extra selector.
 
-Catalogs are cached in `cliproxyapi-models.<providerId>.json`. `/cliproxyapi-refresh` refreshes every endpoint.
+Use a distinct `providerId` for each entry (the default is `cpa`). Entries that resolve to the same id are
+one provider, and the later entry replaces the earlier one. `CLIPROXYAPI_API_KEY`, `CLIPROXYAPI_BASE_URL`,
+`CLIPROXYAPI_PROVIDER_ID`, and `CLIPROXYAPI_PROVIDER_NAME` override that field on every entry. A single
+provider keeps the WebSocket account id `cpa` and `cliproxyapi-models.json`. With more than one provider,
+each id is also its WebSocket account id and each catalog is cached on its own, because Pi caches those
+sockets by session and account id rather than URL. `/cliproxyapi-refresh` refreshes every provider.
 `/reload` re-runs each `!command` on its own. Identical command strings still share one in-process result.
-Duplicate ids are not registered. An empty array registers nothing.
-
-`CLIPROXYAPI_API_KEY`, `CLIPROXYAPI_BASE_URL`, `CLIPROXYAPI_PROVIDER_ID`, and `CLIPROXYAPI_PROVIDER_NAME`
-override only a single object. They are ignored for an array, so one variable cannot retarget every endpoint.
-An entry's `apiKey` can still be a literal, `$ENV` / `${ENV}`, or `!command`.
 
 ```json
 [

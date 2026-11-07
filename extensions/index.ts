@@ -23,13 +23,6 @@ const processState = globalThis as typeof globalThis & {
 processState[KEY_CACHE] ??= new Map();
 const keyCache = processState[KEY_CACHE];
 const LEGACY_CACHE_FILE = "cliproxyapi-models.json";
-const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const OVERRIDE_ENV = [
-  "CLIPROXYAPI_API_KEY",
-  "CLIPROXYAPI_BASE_URL",
-  "CLIPROXYAPI_PROVIDER_ID",
-  "CLIPROXYAPI_PROVIDER_NAME",
-] as const;
 
 export interface RemoteModelItem {
   slug?: string;
@@ -46,13 +39,16 @@ export interface RemoteModelItem {
   supported_reasoning_levels?: Array<{ effort?: string } | string>;
 }
 
-interface ConfiguredEndpoint {
+interface EndpointConfig {
   providerId: string;
   providerName: string;
-  /** pi-ai caches Codex sockets by sessionId and this id, not by URL. */
-  accountId: string;
   rawKey: string;
   baseUrl?: string;
+}
+
+interface ConfiguredEndpoint extends EndpointConfig {
+  /** pi-ai caches Codex sockets by sessionId and this id, not by URL. */
+  accountId: string;
   cacheFile: string;
 }
 
@@ -112,124 +108,43 @@ export function resolveEndpoints(baseUrl?: string) {
   };
 }
 
-function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  // Empty env values count as unset.
-  return env[name]?.trim() || undefined;
-}
-
-function coerced(value: unknown): string | undefined {
-  return String(value ?? "").trim() || undefined;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function loadObject(config: unknown, env: NodeJS.ProcessEnv): ConfiguredEndpoint[] {
-  const cfg = isRecord(config) ? config : {};
-  const setting = (name: string, key: string) => envValue(env, name) || coerced(cfg[key]);
+function readEntry(entry: unknown, env: NodeJS.ProcessEnv): EndpointConfig | undefined {
+  const cfg = isRecord(entry) ? entry : {};
+  // Empty env or config values count as unset. Env wins, for an object and for every array entry.
+  const setting = (name: string, key: string) =>
+    env[name]?.trim() || String(cfg[key] ?? "").trim() || undefined;
   const rawKey = setting("CLIPROXYAPI_API_KEY", "apiKey");
-  if (!rawKey) return [];
+  if (!rawKey) return undefined;
   const providerId = setting("CLIPROXYAPI_PROVIDER_ID", "providerId") ?? "cpa";
-  return [
-    {
-      providerId,
-      providerName: setting("CLIPROXYAPI_PROVIDER_NAME", "providerName") ?? providerId,
-      // Single-object configs keep the historical account id.
-      accountId: "cpa",
-      rawKey,
-      baseUrl: setting("CLIPROXYAPI_BASE_URL", "baseUrl"),
-      cacheFile: LEGACY_CACHE_FILE,
-    },
-  ];
-}
-
-function loadArray(
-  items: unknown[],
-  env: NodeJS.ProcessEnv,
-): { endpoints: ConfiguredEndpoint[]; warnings: string[] } {
-  const warnings: string[] = [];
-  // One env value must not retarget every endpoint. Per-entry $ENV and !command still work.
-  if (OVERRIDE_ENV.some((name) => envValue(env, name))) {
-    warnings.push(
-      "[cliproxyapi] CLIPROXYAPI_* environment overrides are ignored for array configs.",
-    );
-  }
-  const parsed: ConfiguredEndpoint[] = [];
-  for (const item of items) {
-    if (!isRecord(item)) {
-      warnings.push("[cliproxyapi] Skipping non-object endpoint.");
-      continue;
-    }
-    if (typeof item.providerId !== "string" || !item.providerId.trim()) {
-      warnings.push("[cliproxyapi] Array endpoint is missing providerId; not registered.");
-      continue;
-    }
-    const providerId = item.providerId.trim();
-    if (!PROVIDER_ID.test(providerId)) {
-      warnings.push(
-        '[cliproxyapi] Invalid providerId; use 1-64 characters starting with a letter or digit, then letters, digits, ".", "_", or "-". Endpoint not registered.',
-      );
-      continue;
-    }
-    if (typeof item.apiKey !== "string" || !item.apiKey.trim()) {
-      warnings.push(`[cliproxyapi] Endpoint ${providerId} has no apiKey; not registered.`);
-      continue;
-    }
-    let baseUrl: string | undefined;
-    if (item.baseUrl != null) {
-      if (typeof item.baseUrl !== "string") {
-        warnings.push(
-          `[cliproxyapi] Endpoint ${providerId} has an invalid baseUrl; not registered.`,
-        );
-        continue;
-      }
-      baseUrl = item.baseUrl.trim() || undefined;
-    }
-    const providerName =
-      typeof item.providerName === "string" && item.providerName.trim()
-        ? item.providerName.trim()
-        : providerId;
-    parsed.push({
-      providerId,
-      providerName,
-      accountId: providerId,
-      rawKey: item.apiKey.trim(),
-      baseUrl,
-      cacheFile: `cliproxyapi-models.${providerId}.json`,
-    });
-  }
-  const counts = new Map<string, number>();
-  for (const ep of parsed) {
-    const key = ep.providerId.toLowerCase();
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  const dupes = [
-    ...new Set(
-      parsed
-        .filter((ep) => (counts.get(ep.providerId.toLowerCase()) ?? 0) > 1)
-        .map((ep) => ep.providerId),
-    ),
-  ];
-  if (dupes.length > 0) {
-    warnings.push(
-      `[cliproxyapi] Duplicate provider ${dupes.length === 1 ? "id" : "ids"} ${dupes
-        .map((id) => JSON.stringify(id))
-        .join(", ")}; those endpoints were not registered.`,
-    );
-  }
   return {
-    endpoints: parsed.filter((ep) => counts.get(ep.providerId.toLowerCase()) === 1),
-    warnings,
+    providerId,
+    providerName: setting("CLIPROXYAPI_PROVIDER_NAME", "providerName") ?? providerId,
+    rawKey,
+    baseUrl: setting("CLIPROXYAPI_BASE_URL", "baseUrl"),
   };
 }
 
 export function loadEndpoints(
   config: unknown,
   env: NodeJS.ProcessEnv,
-): { endpoints: ConfiguredEndpoint[]; warnings: string[] } {
-  if (Array.isArray(config)) return loadArray(config, env);
-  return { endpoints: loadObject(config, env), warnings: [] };
+): { endpoints: EndpointConfig[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const byId = new Map<string, EndpointConfig>();
+  for (const entry of Array.isArray(config) ? config : [config]) {
+    const ep = readEntry(entry, env);
+    if (!ep) continue;
+    if (byId.has(ep.providerId)) {
+      warnings.push(
+        `[cliproxyapi] Provider id ${JSON.stringify(ep.providerId)} is configured more than once; the later endpoint replaces it.`,
+      );
+    }
+    byId.set(ep.providerId, ep);
+  }
+  return { endpoints: [...byId.values()], warnings };
 }
 
 export async function fetchModels(
@@ -381,23 +296,36 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   for (const warning of loaded.warnings) console.warn(warning);
   if (loaded.endpoints.length === 0) return;
 
-  const running: RunningEndpoint[] = [];
+  const runnable: { ep: EndpointConfig; urls: ReturnType<typeof resolveEndpoints> }[] = [];
   for (const ep of loaded.endpoints) {
-    let urls: ReturnType<typeof resolveEndpoints>;
     try {
-      urls = resolveEndpoints(ep.baseUrl);
+      runnable.push({ ep, urls: resolveEndpoints(ep.baseUrl) });
     } catch {
       // Skip registration rather than crash extension loading; never print the URL itself.
-      console.warn(
-        ep.cacheFile === LEGACY_CACHE_FILE
-          ? "[cliproxyapi] Invalid base URL; provider not registered."
-          : `[cliproxyapi] Invalid base URL for ${ep.providerId}; provider not registered.`,
-      );
-      continue;
+      console.warn("[cliproxyapi] Invalid base URL; provider not registered.");
     }
-    running.push(bindEndpoint(pi, agentDir, ep, urls));
   }
-  if (running.length === 0) return;
+  if (runnable.length === 0) return;
+
+  // One provider keeps the historical socket account id and catalog file.
+  const alone = runnable.length === 1;
+  const running: RunningEndpoint[] = [];
+  for (const { ep, urls } of runnable) {
+    running.push(
+      bindEndpoint(
+        pi,
+        agentDir,
+        {
+          ...ep,
+          accountId: alone ? "cpa" : ep.providerId.replace(/[\r\n]/g, "") || "cpa",
+          cacheFile: alone
+            ? LEGACY_CACHE_FILE
+            : `cliproxyapi-models.${Buffer.from(ep.providerId).toString("base64url")}.json`,
+        },
+        urls,
+      ),
+    );
+  }
 
   const failure = (error: unknown) => (error instanceof Error ? error.message : String(error));
   pi.registerCommand("cliproxyapi-refresh", {

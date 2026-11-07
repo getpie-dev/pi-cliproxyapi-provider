@@ -17,6 +17,10 @@ const registerCommand = vi.fn();
 const SSE =
   'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n';
 
+function catalogCache(providerId: string) {
+  return `cliproxyapi-models.${Buffer.from(providerId).toString("base64url")}.json`;
+}
+
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "pi-cpa-endpoints-"));
   previousEnv = process.env;
@@ -120,11 +124,9 @@ describe("multiple CLIProxyAPI endpoints", () => {
     expect((await runtime.getAuth("cpa-a"))?.auth.apiKey).toBe("stored-a");
     expect((await runtime.getAuth("cpa-b"))?.auth.apiKey).toBe("key-b");
     expect(readFileSync(join(dir, "cliproxyapi-models.json"), "utf8")).toBe(legacy);
-    expect(readFileSync(join(dir, "cliproxyapi-models.cpa-a.json"), "utf8")).toContain("model-a");
-    expect(readFileSync(join(dir, "cliproxyapi-models.cpa-a.json"), "utf8")).not.toContain(
-      "model-b",
-    );
-    expect(readFileSync(join(dir, "cliproxyapi-models.cpa-b.json"), "utf8")).toContain("model-b");
+    expect(readFileSync(join(dir, catalogCache("cpa-a")), "utf8")).toContain("model-a");
+    expect(readFileSync(join(dir, catalogCache("cpa-a")), "utf8")).not.toContain("model-b");
+    expect(readFileSync(join(dir, catalogCache("cpa-b")), "utf8")).toContain("model-b");
     expect(seen.map((call) => [call.url, call.authorization])).toEqual([
       [resolveEndpoints("https://a.example").modelsUrl, "Bearer key-a"],
       [resolveEndpoints("https://b.example").modelsUrl, "Bearer key-b"],
@@ -181,7 +183,7 @@ const timer = setInterval(() => {
       ["cpa-b", "https://b.example", "cached-b"],
     ] as const) {
       writeFileSync(
-        join(dir, `cliproxyapi-models.${id}.json`),
+        join(dir, catalogCache(id)),
         JSON.stringify({
           modelsUrl: resolveEndpoints(baseUrl).modelsUrl,
           models: [modelFixture(modelId, `Cached ${modelId}`)],
@@ -202,16 +204,16 @@ const timer = setInterval(() => {
     expect((await runtime.getAuth("cpa-a"))?.auth.apiKey).toBe("key-a");
     expect((await runtime.getAuth("cpa-b"))?.auth.apiKey).toBe("key-b");
     await vi.waitFor(() =>
-      expect(readFileSync(join(dir, "cliproxyapi-models.cpa-a.json"), "utf8")).toContain("model-a"),
+      expect(readFileSync(join(dir, catalogCache("cpa-a")), "utf8")).toContain("model-a"),
     );
     await vi.waitFor(() =>
-      expect(readFileSync(join(dir, "cliproxyapi-models.cpa-b.json"), "utf8")).toContain("model-b"),
+      expect(readFileSync(join(dir, catalogCache("cpa-b")), "utf8")).toContain("model-b"),
     );
     expect(readFileSync(home.marker, "utf8")).toBe("x");
     expect(readFileSync(work.marker, "utf8")).toBe("x");
   });
 
-  it("does not register either copy of a duplicate provider id", async () => {
+  it("lets the later entry replace an earlier one with the same provider id", async () => {
     writeConfig([
       { providerId: "cpa-a", apiKey: "key-a", baseUrl: "https://a.example" },
       { providerId: "cpa-a", apiKey: "key-b", baseUrl: "https://b.example" },
@@ -220,44 +222,65 @@ const timer = setInterval(() => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await cpaExtension(pi);
     expect(warn.mock.calls).toEqual([
-      ['[cliproxyapi] Duplicate provider id "cpa-a"; those endpoints were not registered.'],
+      [
+        '[cliproxyapi] Provider id "cpa-a" is configured more than once; the later endpoint replaces it.',
+      ],
     ]);
-    expect(runtime.getRegisteredNativeProvider("cpa-a")).toBeUndefined();
-    expect(await runtime.getAuth("cpa-a")).toBeUndefined();
+    expect((await runtime.getAuth("cpa-a"))?.auth.apiKey).toBe("key-b");
+    expect(runtime.getModel("cpa-a", "model-a")).toBeUndefined();
+    expect(runtime.getModel("cpa-a", "model-b")?.baseUrl).toBe("https://b.example/backend-api/");
     expect((await runtime.getAuth("cpa-b"))?.auth.apiKey).toBe("key-c");
     expect(vi.mocked(globalThis.fetch).mock.calls.map(([url]) => String(url))).toEqual([
+      resolveEndpoints("https://b.example").modelsUrl,
       resolveEndpoints("https://c.example").modelsUrl,
     ]);
   });
 
-  it("ignores environment overrides for arrays, including an empty array", async () => {
+  it("applies environment overrides to every array entry", async () => {
     process.env.CLIPROXYAPI_API_KEY = "env-key";
     process.env.CLIPROXYAPI_BASE_URL = "https://env.example";
-    process.env.CLIPROXYAPI_PROVIDER_ID = "env-id";
     process.env.ENDPOINT_B_KEY = "endpoint-b-key";
     writeConfig([]);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await cpaExtension(pi);
     expect(registerCommand).not.toHaveBeenCalled();
-    expect(runtime.getRegisteredNativeProvider("env-id")).toBeUndefined();
     expect(runtime.getRegisteredNativeProvider("cpa")).toBeUndefined();
     expect(globalThis.fetch).not.toHaveBeenCalled();
-    warn.mockClear();
     writeConfig([
       { providerId: "cpa-a", apiKey: "key-a", baseUrl: "https://a.example" },
       { providerId: "cpa-b", apiKey: "$ENDPOINT_B_KEY", baseUrl: "https://b.example" },
     ]);
     await cpaExtension(pi);
-    expect(warn.mock.calls).toEqual([
-      ["[cliproxyapi] CLIPROXYAPI_* environment overrides are ignored for array configs."],
-    ]);
-    expect((await runtime.getAuth("cpa-a"))?.auth.apiKey).toBe("key-a");
-    expect((await runtime.getAuth("cpa-b"))?.auth.apiKey).toBe("endpoint-b-key");
-    expect(await runtime.getAuth("env-id")).toBeUndefined();
+    expect((await runtime.getAuth("cpa-a"))?.auth.apiKey).toBe("env-key");
+    expect((await runtime.getAuth("cpa-b"))?.auth.apiKey).toBe("env-key");
     const urls = vi.mocked(globalThis.fetch).mock.calls.map(([url]) => String(url));
-    expect(urls).toContain(resolveEndpoints("https://a.example").modelsUrl);
-    expect(urls).toContain(resolveEndpoints("https://b.example").modelsUrl);
-    expect(urls.some((url) => url.includes("env.example"))).toBe(false);
+    expect(urls).toEqual([
+      resolveEndpoints("https://env.example").modelsUrl,
+      resolveEndpoints("https://env.example").modelsUrl,
+    ]);
+    const hosts = vi
+      .mocked(globalThis.fetch)
+      .mock.calls.map(([, init]) => new Headers(init?.headers).get("authorization"));
+    expect(hosts).toEqual(["Bearer env-key", "Bearer env-key"]);
+  });
+
+  it("collapses entries onto CLIPROXYAPI_PROVIDER_ID instead of inventing another id", async () => {
+    process.env.CLIPROXYAPI_PROVIDER_ID = "env-id";
+    writeConfig([
+      { providerId: "cpa-a", apiKey: "key-a", baseUrl: "https://a.example" },
+      { providerId: "cpa-b", providerName: "Work", apiKey: "key-b", baseUrl: "https://b.example" },
+    ]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await cpaExtension(pi);
+    expect(warn.mock.calls).toEqual([
+      [
+        '[cliproxyapi] Provider id "env-id" is configured more than once; the later endpoint replaces it.',
+      ],
+    ]);
+    expect(runtime.getRegisteredNativeProvider("cpa-a")).toBeUndefined();
+    expect(runtime.getRegisteredNativeProvider("cpa-b")).toBeUndefined();
+    expect(runtime.getRegisteredNativeProvider("env-id")?.name).toBe("Work");
+    expect((await runtime.getAuth("env-id"))?.auth.apiKey).toBe("key-b");
+    expect(runtime.getModel("env-id", "model-b")?.baseUrl).toBe("https://b.example/backend-api/");
   });
 
   it("skips one invalid endpoint without dropping its sibling", async () => {
@@ -267,9 +290,7 @@ const timer = setInterval(() => {
     ]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await cpaExtension(pi);
-    expect(warn.mock.calls).toEqual([
-      ["[cliproxyapi] Invalid base URL for cpa-a; provider not registered."],
-    ]);
+    expect(warn.mock.calls).toEqual([["[cliproxyapi] Invalid base URL; provider not registered."]]);
     expect(JSON.stringify(warn.mock.calls)).not.toContain("http://[");
     expect(runtime.getRegisteredNativeProvider("cpa-a")).toBeUndefined();
     expect((await runtime.getAuth("cpa-b"))?.auth.apiKey).toBe("key-b");
@@ -432,13 +453,15 @@ process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(value)}, "
     }
   });
 
-  it("keeps the historical cpa account id for a single object with a custom provider id", async () => {
-    writeConfig({
-      providerId: "cpa2",
-      providerName: "CPA",
-      apiKey: "key-a",
-      baseUrl: "https://a.example",
-    });
+  it("keeps the historical cpa account id and catalog file for one array entry", async () => {
+    writeConfig([
+      {
+        providerId: "cpa2",
+        providerName: "CPA",
+        apiKey: "key-a",
+        baseUrl: "https://a.example",
+      },
+    ]);
     const seen: Headers[] = [];
     vi.mocked(globalThis.fetch).mockImplementation(async (url, init) => {
       if (String(url).includes("/v1/models")) {
