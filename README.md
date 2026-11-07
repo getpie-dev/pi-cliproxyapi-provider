@@ -55,8 +55,8 @@ warning, and the first entry is kept. `CLIPROXYAPI_API_KEY`, `CLIPROXYAPI_BASE_U
 `CLIPROXYAPI_PROVIDER_ID`, and `CLIPROXYAPI_PROVIDER_NAME` override that field on every entry, same as
 on one object. `CLIPROXYAPI_PROVIDER_ID` therefore applies to every entry and can make them conflict.
 A single provider keeps the WebSocket account id `cpa` and `cliproxyapi-models.json`. With more than one
-provider, each id is also its WebSocket account id and each catalog is cached in its own digested filename,
-because Pi caches those sockets by session and account id rather than URL. `/cliproxyapi-refresh` refreshes
+provider, that account id and the catalog filename are a SHA-256 of the exact `providerId` (fixed ASCII, not
+the raw id), because Pi caches those sockets by session and account id rather than URL. `/cliproxyapi-refresh` refreshes
 every provider. `/reload` re-runs each `!command` on its own. Identical command strings still share one
 in-process result.
 

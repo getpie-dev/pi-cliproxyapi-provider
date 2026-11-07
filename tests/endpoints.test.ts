@@ -18,8 +18,12 @@ const registerCommand = vi.fn();
 const SSE =
   'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n';
 
+function endpointDigest(providerId: string) {
+  return createHash("sha256").update(providerId).digest("hex");
+}
+
 function catalogCache(providerId: string) {
-  return `cliproxyapi-models.${createHash("sha256").update(providerId).digest("hex")}.json`;
+  return `cliproxyapi-models.${endpointDigest(providerId)}.json`;
 }
 
 beforeEach(async () => {
@@ -145,8 +149,8 @@ describe("multiple CLIProxyAPI endpoints", () => {
     expect((await stream("cpa-b", "model-b")).stopReason).toBe("stop");
     const inference = seen.filter((call) => call.url.includes("/backend-api/"));
     expect(inference.map((call) => [call.account, call.apiKey, new URL(call.url).host])).toEqual([
-      ["cpa-a", "stored-a", "a.example"],
-      ["cpa-b", "key-b", "b.example"],
+      [endpointDigest("cpa-a"), "stored-a", "a.example"],
+      [endpointDigest("cpa-b"), "key-b", "b.example"],
     ]);
     expect(childProcess.execSync).not.toHaveBeenCalled();
   });
@@ -445,13 +449,59 @@ process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(value)}, "
           socket.headers.get("x-api-key"),
         ]),
       ).toEqual([
-        ["a.example", "cpa-a", "key-a"],
-        ["b.example", "cpa-b", "key-b"],
+        ["a.example", endpointDigest("cpa-a"), "key-a"],
+        ["b.example", endpointDigest("cpa-b"), "key-b"],
       ]);
     } finally {
       if (descriptor) Object.defineProperty(globalThis, "WebSocket", descriptor);
       else delete (globalThis as { WebSocket?: unknown }).WebSocket;
     }
+  });
+
+  it("derives distinct fixed identities for unusual and long provider ids", async () => {
+    const ids = ["a\nb", "a\rb", "hôme", `L${"x".repeat(400)}`];
+    writeConfig(
+      ids.map((providerId, index) => ({
+        providerId,
+        apiKey: `key-${index}`,
+        baseUrl: `https://u${index}.example`,
+      })),
+    );
+    const seen: { account: string | null; apiKey: string | null }[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) => {
+      const href = String(url);
+      const headers = new Headers(init?.headers);
+      if (href.includes("/v1/models")) {
+        const index = new URL(href).host.match(/^u(\d+)/)?.[1] ?? "0";
+        return new Response(JSON.stringify({ data: [{ id: `model-${index}` }] }));
+      }
+      seen.push({
+        account: headers.get("chatgpt-account-id"),
+        apiKey: headers.get("x-api-key"),
+      });
+      return new Response(SSE, { headers: { "content-type": "text/event-stream" } });
+    });
+    await cpaExtension(pi);
+    for (const [index, id] of ids.entries()) {
+      const digest = endpointDigest(id);
+      expect(digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(catalogCache(id)).toBe(`cliproxyapi-models.${digest}.json`);
+      expect(catalogCache(id).includes(id)).toBe(false);
+      expect(readFileSync(join(dir, catalogCache(id)), "utf8")).toContain(`model-${index}`);
+      const result = await runtime
+        .streamSimple(
+          runtime.getModel(id, `model-${index}`)! as Model<"openai-codex-responses">,
+          { messages: [] },
+          { transport: "sse", sessionId: "shared-session" },
+        )
+        .result();
+      expect(result.stopReason).toBe("stop");
+      expect((await runtime.getAuth(id))?.auth.apiKey).toBe(`key-${index}`);
+    }
+    expect(seen.map((call) => call.account)).toEqual(ids.map(endpointDigest));
+    expect(new Set(seen.map((call) => call.account)).size).toBe(ids.length);
+    expect(seen.map((call) => call.apiKey)).toEqual(ids.map((_, index) => `key-${index}`));
+    expect(seen.some((call) => /[\r\n]/.test(call.account ?? ""))).toBe(false);
   });
 
   it("keeps the historical cpa account id and catalog file for one array entry", async () => {

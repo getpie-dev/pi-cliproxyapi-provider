@@ -308,16 +308,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const alone = runnable.length === 1;
   const running: RunningEndpoint[] = [];
   for (const { ep, urls } of runnable) {
+    // pi-ai keys sockets by account id, not URL, and sends that value as a header.
+    const digest = alone ? undefined : createHash("sha256").update(ep.providerId).digest("hex");
     running.push(
       bindEndpoint(
         pi,
         agentDir,
         {
           ...ep,
-          accountId: alone ? "cpa" : ep.providerId.replace(/[\r\n]/g, "") || "cpa",
-          cacheFile: alone
-            ? LEGACY_CACHE_FILE
-            : `cliproxyapi-models.${createHash("sha256").update(ep.providerId).digest("hex")}.json`,
+          accountId: digest ?? "cpa",
+          cacheFile: digest ? `cliproxyapi-models.${digest}.json` : LEGACY_CACHE_FILE,
         },
         urls,
       ),
