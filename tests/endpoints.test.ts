@@ -85,6 +85,280 @@ async function refreshCatalog() {
   return notify;
 }
 
+const ANTHROPIC_SSE = [
+  {
+    type: "message_start",
+    message: {
+      id: "msg-test",
+      type: "message",
+      role: "assistant",
+      model: "glm-test",
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 2, output_tokens: 0 },
+    },
+  },
+  { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+  { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "synthetic reply" } },
+  { type: "content_block_stop", index: 0 },
+  {
+    type: "message_delta",
+    delta: { stop_reason: "end_turn", stop_sequence: null },
+    usage: { output_tokens: 3 },
+  },
+  { type: "message_stop" },
+]
+  .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+  .join("");
+
+describe("per-endpoint protocols", () => {
+  it("skips an unsupported protocol before resolving credentials, keeping valid siblings", async () => {
+    writeConfig([
+      {
+        providerId: "tcpa",
+        api: "secret-unsupported",
+        apiKey: "!secret-command",
+        baseUrl: "https://secret-host.example",
+      },
+      {
+        providerId: "tcpa",
+        api: "anthropic-messages",
+        apiKey: "synthetic-key",
+        baseUrl: "https://gateway.example",
+      },
+    ]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const exec = vi.spyOn(childProcess, "exec");
+    syncBuiltinESMExports();
+    await cpaExtension(pi);
+    expect(warn.mock.calls).toEqual([["[cliproxyapi] Unsupported api; provider not registered."]]);
+    expect(exec).not.toHaveBeenCalled();
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    expect(runtime.getModel("tcpa", "model-a")?.api).toBe("anthropic-messages");
+  });
+
+  it.each([
+    [false, "https://gateway.example", "https://gateway.example"],
+    [true, "https://gateway.example/v1/", "https://gateway.example"],
+    [false, "gateway.example/proxy/v1", "http://gateway.example/proxy"],
+    [true, undefined, "http://127.0.0.1:8317"],
+  ])("streams Anthropic through the gateway (array=%s, base=%s)", async (array, baseUrl, root) => {
+    process.env.GATEWAY_KEY = " synthetic-gateway-key ";
+    const config = { api: "anthropic-messages", apiKey: "$GATEWAY_KEY", baseUrl };
+    writeConfig(array ? [config] : config);
+    const requests: { url: string; headers: Headers; body: unknown }[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) => {
+      const href = String(url);
+      const headers = new Headers(init?.headers);
+      requests.push({
+        url: href,
+        headers,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      if (href === `${root}/v1/models?client_version=pi`) {
+        expect(headers.get("authorization")).toBe("Bearer synthetic-gateway-key");
+        return new Response(JSON.stringify({ data: [{ id: "glm-test" }] }));
+      }
+      expect(href).toBe(`${root}/v1/messages?beta=true`);
+      return new Response(ANTHROPIC_SSE, { headers: { "content-type": "text/event-stream" } });
+    });
+    await cpaExtension(pi);
+    const model = runtime.getModel("cpa", "glm-test")!;
+    expect(model).toMatchObject({ api: "anthropic-messages", baseUrl: root, reasoning: false });
+    expect(await runtime.getAvailable("cpa")).toHaveLength(1);
+    const context = {
+      systemPrompt: "synthetic system",
+      messages: [{ role: "user" as const, content: "hello gateway", timestamp: 0 }],
+    };
+    for (const full of [false, true]) {
+      const result = await (full
+        ? runtime.stream(model, context)
+        : runtime.streamSimple(model, context)
+      ).result();
+      expect(result.errorMessage).toBeUndefined();
+      expect(result.stopReason).toBe("stop");
+      expect(result.content).toEqual([{ type: "text", text: "synthetic reply" }]);
+      expect(result.usage).toMatchObject({ input: 2, output: 3 });
+    }
+    expect(requests).toHaveLength(3);
+    for (const request of requests.slice(1)) {
+      expect(request.headers.get("x-api-key")).toBe("synthetic-gateway-key");
+      expect(request.headers.get("authorization")).toBeNull();
+      expect(request.headers.get("chatgpt-account-id")).toBeNull();
+      expect(request.headers.get("anthropic-version")).toBe("2023-06-01");
+      expect(request.body).toMatchObject({
+        model: "glm-test",
+        stream: true,
+        messages: [{ role: "user", content: [{ type: "text", text: "hello gateway" }] }],
+        system: [{ type: "text", text: "synthetic system" }],
+      });
+      expect(JSON.stringify(request.body)).not.toContain("cpa_v1.");
+    }
+  });
+
+  it("isolates mixed-protocol models, credentials, refreshes, and caches", async () => {
+    writeConfig([
+      { providerId: "cpa", apiKey: "codex-key", baseUrl: "https://cpa.example" },
+      {
+        providerId: "tcpa",
+        api: "anthropic-messages",
+        apiKey: "gateway-key",
+        baseUrl: "https://tcpa.example/v1",
+      },
+    ]);
+    await credentials.modify("tcpa", async () => ({ type: "api_key", key: "stored-gateway-key" }));
+    const inference: { url: string; headers: Headers; body: Record<string, unknown> }[] = [];
+    const catalogs: [string, string | null][] = [];
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) => {
+      const href = String(url);
+      const headers = new Headers(init?.headers);
+      if (href.includes("/v1/models")) {
+        catalogs.push([href, headers.get("authorization")]);
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "shared-model",
+                supported_reasoning_levels: ["none", "high"],
+                context_window: 64000,
+                max_output_tokens: 8000,
+                input_modalities: ["text", "image"],
+              },
+            ],
+          }),
+        );
+      }
+      inference.push({
+        url: href,
+        headers,
+        body: href.includes("tcpa.example") ? JSON.parse(String(init?.body)) : {},
+      });
+      return new Response(href.includes("tcpa.example") ? ANTHROPIC_SSE : SSE, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    await cpaExtension(pi);
+    const codex = runtime.getModel("cpa", "shared-model")!;
+    const anthropic = runtime.getModel("tcpa", "shared-model")!;
+    expect(codex).toMatchObject({
+      api: "openai-codex-responses",
+      thinkingLevelMap: { off: "none", high: "high" },
+    });
+    expect(anthropic).toMatchObject({
+      api: "anthropic-messages",
+      provider: "tcpa",
+      reasoning: true,
+      contextWindow: 64000,
+      maxTokens: 8000,
+      input: ["text", "image"],
+    });
+    expect(anthropic.thinkingLevelMap).toBeUndefined();
+    expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("codex-key");
+    expect((await runtime.getAuth("tcpa"))?.auth.apiKey).toBe("stored-gateway-key");
+    const context = { messages: [{ role: "user" as const, content: "synthetic", timestamp: 0 }] };
+    const codexResult = await runtime
+      .streamSimple(codex, context, { transport: "sse", sessionId: "mixed" })
+      .result();
+    expect(codexResult.errorMessage).toBeUndefined();
+    expect(codexResult.stopReason).toBe("stop");
+    for (const apiKey of [undefined, "request-gateway-key"]) {
+      expect(
+        (
+          await runtime
+            .streamSimple(anthropic, context, { apiKey, sessionId: "mixed", reasoning: "high" })
+            .result()
+        ).stopReason,
+      ).toBe("stop");
+    }
+    expect(inference.map(({ url }) => url)).toEqual([
+      "https://cpa.example/backend-api/codex/responses",
+      "https://tcpa.example/v1/messages?beta=true",
+      "https://tcpa.example/v1/messages?beta=true",
+    ]);
+    expect(inference[0]!.headers.get("x-api-key")).toBe("codex-key");
+    expect(inference[0]!.headers.get("chatgpt-account-id")).toBe(endpointDigest("cpa"));
+    for (const [index, key] of [
+      [1, "stored-gateway-key"],
+      [2, "request-gateway-key"],
+    ] as const) {
+      expect(inference[index]!.headers.get("x-api-key")).toBe(key);
+      expect(inference[index]!.headers.get("authorization")).toBeNull();
+      expect(inference[index]!.headers.get("chatgpt-account-id")).toBeNull();
+      expect(inference[index]!.body.thinking).toMatchObject({ type: "enabled" });
+    }
+    expect(await refreshCatalog()).toHaveBeenCalledWith(
+      "Refreshed 1 cpa models. Refreshed 1 tcpa models.",
+      "info",
+    );
+    expect(catalogs).toEqual([
+      ["https://cpa.example/v1/models?client_version=pi", "Bearer codex-key"],
+      ["https://tcpa.example/v1/models?client_version=pi", "Bearer gateway-key"],
+      ["https://cpa.example/v1/models?client_version=pi", "Bearer codex-key"],
+      ["https://tcpa.example/v1/models?client_version=pi", "Bearer gateway-key"],
+    ]);
+    for (const [id, api] of [
+      ["cpa", "openai-codex-responses"],
+      ["tcpa", "anthropic-messages"],
+    ]) {
+      const cache = JSON.parse(readFileSync(join(dir, catalogCache(id!)), "utf8"));
+      expect(cache.api).toBe(api);
+      expect(cache.modelsUrl).toContain(`${id}.example`);
+      expect(JSON.stringify(cache)).not.toContain("key");
+    }
+  });
+
+  it.each([
+    [undefined, "anthropic-messages"],
+    ["openai-codex-responses", "anthropic-messages"],
+    ["anthropic-messages", "openai-codex-responses"],
+  ])("rejects stale %s metadata when configured as %s", async (cachedApi, api) => {
+    writeConfig({ api, apiKey: "synthetic", baseUrl: "https://gateway.example" });
+    writeFileSync(
+      join(dir, "cliproxyapi-models.json"),
+      JSON.stringify({
+        modelsUrl: "https://gateway.example/v1/models?client_version=pi",
+        api: cachedApi,
+        models: [
+          { ...modelFixture("stale-model"), thinkingLevelMap: { off: "none", high: "high" } },
+        ],
+      }),
+    );
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error("offline"));
+    await cpaExtension(pi);
+    expect(runtime.getModel("cpa", "stale-model")).toBeUndefined();
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ id: "fresh-model" }] })),
+    );
+    await refreshCatalog();
+    expect(runtime.getModel("cpa", "fresh-model")?.api).toBe(api);
+    expect(JSON.parse(readFileSync(join(dir, "cliproxyapi-models.json"), "utf8")).api).toBe(api);
+  });
+
+  it("uses a matching Anthropic cache while its background refresh is offline", async () => {
+    writeConfig({
+      api: "anthropic-messages",
+      apiKey: "synthetic",
+      baseUrl: "https://gateway.example",
+    });
+    writeFileSync(
+      join(dir, "cliproxyapi-models.json"),
+      JSON.stringify({
+        modelsUrl: "https://gateway.example/v1/models?client_version=pi",
+        api: "anthropic-messages",
+        models: [modelFixture("cached-glm")],
+      }),
+    );
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error("offline"));
+    await cpaExtension(pi);
+    expect(runtime.getModel("cpa", "cached-glm")).toMatchObject({
+      api: "anthropic-messages",
+      baseUrl: "https://gateway.example",
+    });
+  });
+});
+
 describe("multiple CLIProxyAPI endpoints", () => {
   it("routes credentials, catalogs, and requests to the selected endpoint", async () => {
     const legacy = `${JSON.stringify({
@@ -336,7 +610,10 @@ const timer = setInterval(() => {
     );
   });
 
-  it("reloads each command credential without reusing the other endpoint's key", async () => {
+  it.each([
+    "openai-codex-responses",
+    "anthropic-messages",
+  ])("reloads isolated command credentials with %s", async (api) => {
     const files = ["a", "b"].map((id) => {
       const value = join(dir, `value-${id}`);
       const script = join(dir, `${id}.cjs`);
@@ -356,7 +633,7 @@ process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(value)}, "
     });
     writeConfig([
       { providerId: "cpa-a", apiKey: files[0]!.raw, baseUrl: "https://a.example" },
-      { providerId: "cpa-b", apiKey: files[1]!.raw, baseUrl: "https://b.example" },
+      { providerId: "cpa-b", api, apiKey: files[1]!.raw, baseUrl: "https://b.example" },
     ]);
     await cpaExtension(pi);
     expect((await runtime.getAuth("cpa-a"))?.auth.apiKey).toBe("old-a");

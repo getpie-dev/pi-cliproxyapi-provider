@@ -8,7 +8,7 @@ import {
   normalizeContext,
   type ProviderStreams,
 } from "@earendil-works/pi-ai";
-import { openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
+import { anthropicMessagesApi, openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
 import {
   type ExtensionAPI,
   getAgentDir,
@@ -16,6 +16,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 const codexApi = openAICodexResponsesApi();
+const anthropicApi = anthropicMessagesApi();
+type EndpointApi = "openai-codex-responses" | "anthropic-messages";
 const KEY_CACHE = Symbol.for("@getpie/pi-cliproxyapi-provider.keys");
 const processState = globalThis as typeof globalThis & {
   [KEY_CACHE]?: Map<string, Promise<string | undefined>>;
@@ -41,6 +43,7 @@ export interface RemoteModelItem {
 }
 
 interface EndpointConfig {
+  api: EndpointApi;
   providerId: string;
   providerName: string;
   rawKey: string;
@@ -99,12 +102,16 @@ export async function resolveKey(raw: string | undefined): Promise<string | unde
   return env ? process.env[env]?.trim() || undefined : s;
 }
 
-export function resolveEndpoints(baseUrl?: string) {
+export function resolveEndpoints(baseUrl?: string, api: EndpointApi = "openai-codex-responses") {
   const s = baseUrl?.trim() || "http://127.0.0.1:8317";
   const url = new URL(/^https?:\/\//i.test(s) ? s : `http://${s}`);
-  const root = url.pathname.replace(/\/+$/, "").replace(/\/(?:v1|backend-api)$/, "");
+  const root = url.pathname
+    .replace(/\/+$/, "")
+    .replace(api === "anthropic-messages" ? /\/v1$/ : /\/(?:v1|backend-api)$/, "");
   return {
-    inferenceBaseUrl: `${url.origin}${root}/backend-api/`,
+    // Native Anthropic appends /v1/messages to baseURL (including any gateway path prefix).
+    inferenceBaseUrl:
+      api === "anthropic-messages" ? `${url.origin}${root}` : `${url.origin}${root}/backend-api/`,
     modelsUrl: `${url.origin}${root}/v1/models?client_version=pi`,
   };
 }
@@ -126,6 +133,11 @@ export function loadEndpoints(
       env[name]?.trim() || String(cfg[key] ?? "").trim() || undefined;
     const rawKey = setting("CLIPROXYAPI_API_KEY", "apiKey");
     if (!rawKey) continue;
+    const api = cfg.api === undefined ? "openai-codex-responses" : cfg.api;
+    if (api !== "openai-codex-responses" && api !== "anthropic-messages") {
+      warnings.push("[cliproxyapi] Unsupported api; provider not registered.");
+      continue;
+    }
     const providerId = setting("CLIPROXYAPI_PROVIDER_ID", "providerId") ?? "cpa";
     if (seen.has(providerId)) {
       warnings.push(
@@ -135,6 +147,7 @@ export function loadEndpoints(
     }
     seen.add(providerId);
     endpoints.push({
+      api,
       providerId,
       providerName: setting("CLIPROXYAPI_PROVIDER_NAME", "providerName") ?? providerId,
       rawKey,
@@ -148,6 +161,7 @@ export async function fetchModels(
   modelsUrl: string,
   apiKey: string,
   fetchImpl = globalThis.fetch,
+  api: EndpointApi = "openai-codex-responses",
 ): Promise<ProviderModelConfig[]> {
   const res = await fetchImpl(modelsUrl, {
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -170,22 +184,24 @@ export async function fetchModels(
             .toLowerCase(),
         )
         .filter(Boolean);
+      // Codex effort strings are not Anthropic thinking budgets; only Codex gets this map.
       // Pi hides levels mapped to null and omits the reasoning field when "off" maps to null.
       const level = (effort: string) => (efforts.includes(effort) ? effort : null);
       return {
         id,
         name: String(m.display_name ?? m.name ?? id).trim(),
         reasoning: efforts.length > 0,
-        ...(efforts.length > 0 && {
-          thinkingLevelMap: {
-            off: level("none"),
-            minimal: level("minimal"),
-            low: level("low"),
-            medium: level("medium"),
-            high: level("high"),
-            xhigh: level("xhigh"),
-          },
-        }),
+        ...(api === "openai-codex-responses" &&
+          efforts.length > 0 && {
+            thinkingLevelMap: {
+              off: level("none"),
+              minimal: level("minimal"),
+              low: level("low"),
+              medium: level("medium"),
+              high: level("high"),
+              xhigh: level("xhigh"),
+            },
+          }),
         input: (m.input_modalities ?? []).some((x) => String(x).toLowerCase() === "image")
           ? (["text", "image"] as Array<"text" | "image">)
           : (["text"] as Array<"text" | "image">),
@@ -242,10 +258,18 @@ function bindEndpoint(
         models: models.map((model) => ({
           ...model,
           provider: ep.providerId,
-          api: "openai-codex-responses" as const,
+          api: ep.api,
           baseUrl: inferenceBaseUrl,
         })),
-        api: { stream: streamSimple, streamSimple },
+        api:
+          ep.api === "anthropic-messages"
+            ? {
+                stream: (model, context, options) =>
+                  anthropicApi.stream(model, normalizeContext(context), options),
+                streamSimple: (model, context, options) =>
+                  anthropicApi.streamSimple(model, normalizeContext(context), options),
+              }
+            : { stream: streamSimple, streamSimple },
       }),
     );
   };
@@ -253,9 +277,9 @@ function bindEndpoint(
   const refresh = async () => {
     const key = await resolveKey(ep.rawKey);
     if (!key) throw new Error("Missing API key");
-    const models = await fetchModels(modelsUrl, key);
+    const models = await fetchModels(modelsUrl, key, globalThis.fetch, ep.api);
     mkdirSync(dirname(cachePath), { recursive: true });
-    writeFileSync(cachePath, `${JSON.stringify({ modelsUrl, models }, null, 2)}\n`);
+    writeFileSync(cachePath, `${JSON.stringify({ modelsUrl, api: ep.api, models }, null, 2)}\n`);
     register(models);
     return models;
   };
@@ -264,10 +288,12 @@ function bindEndpoint(
     try {
       const cached = JSON.parse(readFileSync(cachePath, "utf8")) as {
         modelsUrl?: string;
+        api?: EndpointApi;
         models?: ProviderModelConfig[];
       };
       if (
         cached?.modelsUrl === modelsUrl &&
+        (cached.api ?? "openai-codex-responses") === ep.api &&
         Array.isArray(cached.models) &&
         cached.models.length > 0
       ) {
@@ -296,7 +322,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const runnable: { ep: EndpointConfig; urls: ReturnType<typeof resolveEndpoints> }[] = [];
   for (const ep of loaded.endpoints) {
     try {
-      runnable.push({ ep, urls: resolveEndpoints(ep.baseUrl) });
+      runnable.push({ ep, urls: resolveEndpoints(ep.baseUrl, ep.api) });
     } catch {
       // Skip registration rather than crash extension loading; never print the URL itself.
       console.warn("[cliproxyapi] Invalid base URL; provider not registered.");

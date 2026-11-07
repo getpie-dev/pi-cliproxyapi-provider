@@ -134,6 +134,40 @@ describe("@getpie/pi-cliproxyapi-provider", () => {
 });
 
 describe("endpoint configuration", () => {
+  it.each([
+    undefined,
+    "openai-codex-responses",
+    "anthropic-messages",
+  ])("parses api %s identically in an object and array without an env override", (api) => {
+    const config = { api, apiKey: "file-key" };
+    const env = { CLIPROXYAPI_API: "unsupported", CLIPROXYAPI_API_KEY: "env-key" };
+    const result = loadEndpoints(config, env);
+    expect(loadEndpoints([config], env)).toEqual(result);
+    expect(result.warnings).toEqual([]);
+    expect(result.endpoints[0]).toMatchObject({
+      api: api ?? "openai-codex-responses",
+      rawKey: "env-key",
+      providerId: "cpa",
+    });
+  });
+
+  it.each([
+    null,
+    "",
+    " anthropic-messages ",
+    "openai-responses",
+    "secret-key",
+    42,
+  ])("rejects unsupported api %s without echoing configuration", (api) => {
+    const config = { api, apiKey: "secret-key", baseUrl: "https://secret-host.example" };
+    const result = loadEndpoints(config, {});
+    expect(loadEndpoints([config], {})).toEqual(result);
+    expect(result).toEqual({
+      endpoints: [],
+      warnings: ["[cliproxyapi] Unsupported api; provider not registered."],
+    });
+  });
+
   it("uses the same defaults, coercion, and env overrides for an object and [object]", () => {
     const cases: Array<{ config: Record<string, unknown> | null; env: NodeJS.ProcessEnv }> = [
       { config: { apiKey: "file-key" }, env: {} },
@@ -161,7 +195,13 @@ describe("endpoint configuration", () => {
       expect(loadEndpoints([config], env)).toEqual(loadEndpoints(config, env));
     }
     expect(loadEndpoints({ apiKey: "k" }, {}).endpoints).toEqual([
-      { providerId: "cpa", providerName: "cpa", rawKey: "k", baseUrl: undefined },
+      {
+        api: "openai-codex-responses",
+        providerId: "cpa",
+        providerName: "cpa",
+        rawKey: "k",
+        baseUrl: undefined,
+      },
     ]);
     expect(loadEndpoints([{ apiKey: 123 }], {}).endpoints[0]?.rawKey).toBe("123");
     expect(loadEndpoints([], { CLIPROXYAPI_API_KEY: "env-key" })).toEqual({
@@ -188,12 +228,14 @@ describe("endpoint configuration", () => {
       warnings: [],
       endpoints: [
         {
+          api: "openai-codex-responses",
           providerId: "cpa-home",
           providerName: "Shared",
           rawKey: "env-key",
           baseUrl: "https://env.example",
         },
         {
+          api: "openai-codex-responses",
           providerId: "cpa-work",
           providerName: "Shared",
           rawKey: "env-key",
@@ -223,8 +265,20 @@ describe("endpoint configuration", () => {
     ).toEqual({
       warnings: [skipped("cpa")],
       endpoints: [
-        { providerId: "cpa", providerName: "cpa", rawKey: "first", baseUrl: "https://a.example" },
-        { providerId: "CPA", providerName: "CPA", rawKey: "other", baseUrl: undefined },
+        {
+          api: "openai-codex-responses",
+          providerId: "cpa",
+          providerName: "cpa",
+          rawKey: "first",
+          baseUrl: "https://a.example",
+        },
+        {
+          api: "openai-codex-responses",
+          providerId: "CPA",
+          providerName: "CPA",
+          rawKey: "other",
+          baseUrl: undefined,
+        },
       ],
     });
     expect(
@@ -239,6 +293,7 @@ describe("endpoint configuration", () => {
       warnings: [skipped("env-id")],
       endpoints: [
         {
+          api: "openai-codex-responses",
           providerId: "env-id",
           providerName: "env-id",
           rawKey: "first",
