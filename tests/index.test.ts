@@ -138,6 +138,7 @@ describe("endpoint configuration", () => {
     undefined,
     "openai-codex-responses",
     "anthropic-messages",
+    "openai-responses",
   ])("parses api %s identically in an object and array without an env override", (api) => {
     const config = { api, apiKey: "file-key" };
     const env = { CLIPROXYAPI_API: "unsupported", CLIPROXYAPI_API_KEY: "env-key" };
@@ -155,7 +156,9 @@ describe("endpoint configuration", () => {
     null,
     "",
     " anthropic-messages ",
-    "openai-responses",
+    " openai-responses ",
+    "openai",
+    "openai-completions",
     "secret-key",
     42,
   ])("rejects unsupported api %s without echoing configuration", (api) => {

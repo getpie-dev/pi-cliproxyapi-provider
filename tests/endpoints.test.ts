@@ -112,6 +112,38 @@ const ANTHROPIC_SSE = [
   .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
   .join("");
 
+const RESPONSES_SSE = [
+  { type: "response.created", response: { id: "r" } },
+  {
+    type: "response.output_item.added",
+    output_index: 0,
+    item: { id: "msg", type: "message", role: "assistant", content: [] },
+  },
+  { type: "response.output_text.delta", output_index: 0, delta: "synthetic reply" },
+  {
+    type: "response.output_item.done",
+    output_index: 0,
+    item: {
+      id: "msg",
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "synthetic reply", annotations: [] }],
+    },
+  },
+  {
+    type: "response.completed",
+    response: {
+      id: "r",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 },
+    },
+  },
+]
+  .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+  .join("");
+
 describe("per-endpoint protocols", () => {
   it("skips an unsupported protocol before resolving credentials, keeping valid siblings", async () => {
     writeConfig([
@@ -199,6 +231,120 @@ describe("per-endpoint protocols", () => {
     }
   });
 
+  it.each([
+    [false, "https://gateway.example", "https://gateway.example/v1"],
+    [true, "https://gateway.example/v1/", "https://gateway.example/v1"],
+    [false, "gateway.example/proxy/v1", "http://gateway.example/proxy/v1"],
+    [true, undefined, "http://127.0.0.1:8317/v1"],
+  ])("streams native Responses (array=%s, base=%s)", async (array, baseUrl, root) => {
+    process.env.GATEWAY_KEY = " synthetic-responses-key ";
+    const config = { api: "openai-responses", apiKey: "$GATEWAY_KEY", baseUrl };
+    writeConfig(array ? [config] : config);
+    const requests: { url: string; headers: Headers; body: Record<string, unknown> }[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) => {
+      const href = String(url);
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer synthetic-responses-key");
+      expect(headers.get("x-api-key")).toBeNull();
+      expect(headers.get("chatgpt-account-id")).toBeNull();
+      if (href === `${root}/models?client_version=pi`) {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { slug: "hidden", visibility: "hide" },
+              { slug: "unlisted", visibility: "none" },
+              {
+                slug: "gpt-6-astra",
+                visibility: "list",
+                max_tokens: 64000,
+                max_output_tokens: 8000,
+                context_window: 500000,
+                supported_reasoning_levels: ["none", "high", "xhigh"],
+              },
+            ],
+          }),
+        );
+      }
+      expect(href).toBe(`${root}/responses`);
+      expect(init?.method).toBe("POST");
+      requests.push({ url: href, headers, body: JSON.parse(String(init?.body)) });
+      return new Response(RESPONSES_SSE, { headers: { "content-type": "text/event-stream" } });
+    });
+    await cpaExtension(pi);
+    const model = runtime.getModel("cpa", "gpt-6-astra")! as Model<"openai-responses">;
+    expect(model).toMatchObject({
+      api: "openai-responses",
+      baseUrl: root,
+      maxTokens: 64000,
+      contextWindow: 500000,
+      reasoning: true,
+      thinkingLevelMap: {
+        off: "none",
+        minimal: null,
+        low: null,
+        medium: null,
+        high: "high",
+        xhigh: "xhigh",
+      },
+    });
+    expect(await runtime.getAvailable("cpa")).toHaveLength(1);
+    const context = { messages: [{ role: "user" as const, content: "hello", timestamp: 0 }] };
+    for (const full of [false, true]) {
+      const stream = full
+        ? runtime.stream(model, context, { reasoningEffort: "xhigh", reasoningSummary: "detailed" })
+        : runtime.streamSimple(model, context, { reasoning: "high" });
+      const deltas: string[] = [];
+      for await (const event of stream) {
+        if (event.type === "text_delta") deltas.push(event.delta);
+      }
+      const result = await stream.result();
+      expect(result.errorMessage).toBeUndefined();
+      expect(result.stopReason).toBe("stop");
+      expect(result.content).toMatchObject([{ type: "text", text: "synthetic reply" }]);
+      expect(result.usage).toMatchObject({ input: 2, output: 3 });
+      expect(deltas).toEqual(["synthetic reply"]);
+    }
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.body).toMatchObject({
+      model: "gpt-6-astra",
+      stream: true,
+      max_output_tokens: 64000,
+      reasoning: { effort: "high", summary: "auto" },
+    });
+    expect(requests[1]!.body.reasoning).toEqual({ effort: "xhigh", summary: "detailed" });
+    for (const { headers, body } of requests) {
+      expect(headers.get("anthropic-version")).toBeNull();
+      expect(body.thinking).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain("cpa_v1.");
+    }
+  });
+
+  it.each([
+    [["none", "high"], { effort: "none" }],
+    [["high"], undefined],
+    [[], undefined],
+  ])("uses native Responses off reasoning for catalog levels %j", async (levels, expected) => {
+    writeConfig({ api: "openai-responses", apiKey: "synthetic-key" });
+    const bodies: Record<string, unknown>[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) => {
+      if (String(url).includes("/models?")) {
+        return new Response(
+          JSON.stringify({ models: [{ id: "m", supported_reasoning_levels: levels }] }),
+        );
+      }
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(RESPONSES_SSE, { headers: { "content-type": "text/event-stream" } });
+    });
+    await cpaExtension(pi);
+    const result = await runtime
+      .streamSimple(runtime.getModel("cpa", "m")!, { messages: [] })
+      .result();
+    expect(result.stopReason).toBe("stop");
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.reasoning).toEqual(expected);
+    expect(bodies[0]!.thinking).toBeUndefined();
+  });
+
   it("isolates mixed-protocol models, credentials, refreshes, and caches", async () => {
     writeConfig([
       { providerId: "cpa", apiKey: "codex-key", baseUrl: "https://cpa.example" },
@@ -208,7 +354,17 @@ describe("per-endpoint protocols", () => {
         apiKey: "gateway-key",
         baseUrl: "https://tcpa.example/v1",
       },
+      {
+        providerId: "cpamp",
+        api: "openai-responses",
+        apiKey: "responses-key",
+        baseUrl: "https://cpamp.example/v1",
+      },
     ]);
+    await credentials.modify("cpamp", async () => ({
+      type: "api_key",
+      key: "stored-responses-key",
+    }));
     await credentials.modify("tcpa", async () => ({ type: "api_key", key: "stored-gateway-key" }));
     const inference: { url: string; headers: Headers; body: Record<string, unknown> }[] = [];
     const catalogs: [string, string | null][] = [];
@@ -234,9 +390,9 @@ describe("per-endpoint protocols", () => {
       inference.push({
         url: href,
         headers,
-        body: href.includes("tcpa.example") ? JSON.parse(String(init?.body)) : {},
+        body: new URL(href).hostname === "cpa.example" ? {} : JSON.parse(String(init?.body)),
       });
-      return new Response(href.includes("tcpa.example") ? ANTHROPIC_SSE : SSE, {
+      return new Response(href.includes("tcpa.example") ? ANTHROPIC_SSE : RESPONSES_SSE, {
         headers: { "content-type": "text/event-stream" },
       });
     });
@@ -254,6 +410,13 @@ describe("per-endpoint protocols", () => {
       contextWindow: 64000,
       maxTokens: 8000,
       input: ["text", "image"],
+    });
+    const responses = runtime.getModel("cpamp", "shared-model")!;
+    expect(responses).toMatchObject({
+      api: "openai-responses",
+      provider: "cpamp",
+      baseUrl: "https://cpamp.example/v1",
+      thinkingLevelMap: codex.thinkingLevelMap,
     });
     expect(anthropic.thinkingLevelMap).toBeUndefined();
     expect((await runtime.getAuth("cpa"))?.auth.apiKey).toBe("codex-key");
@@ -273,10 +436,19 @@ describe("per-endpoint protocols", () => {
         ).stopReason,
       ).toBe("stop");
     }
+    for (const apiKey of [undefined, "request-responses-key"]) {
+      const result = await runtime
+        .streamSimple(responses, context, { apiKey, sessionId: "mixed", reasoning: "high" })
+        .result();
+      expect(result.stopReason).toBe("stop");
+      expect(result.content).toMatchObject([{ type: "text", text: "synthetic reply" }]);
+    }
     expect(inference.map(({ url }) => url)).toEqual([
       "https://cpa.example/backend-api/codex/responses",
       "https://tcpa.example/v1/messages?beta=true",
       "https://tcpa.example/v1/messages?beta=true",
+      "https://cpamp.example/v1/responses",
+      "https://cpamp.example/v1/responses",
     ]);
     expect(inference[0]!.headers.get("x-api-key")).toBe("codex-key");
     expect(inference[0]!.headers.get("chatgpt-account-id")).toBe(endpointDigest("cpa"));
@@ -291,19 +463,32 @@ describe("per-endpoint protocols", () => {
       expect(inference[index]!.headers.get("accept")).toBe("application/json");
       expect(inference[index]!.body.thinking).toMatchObject({ type: "enabled" });
     }
+    for (const [index, key] of [
+      [3, "stored-responses-key"],
+      [4, "request-responses-key"],
+    ] as const) {
+      expect(inference[index]!.headers.get("authorization")).toBe(`Bearer ${key}`);
+      expect(inference[index]!.headers.get("x-api-key")).toBeNull();
+      expect(inference[index]!.headers.get("chatgpt-account-id")).toBeNull();
+      expect(inference[index]!.body.reasoning).toMatchObject({ effort: "high" });
+      expect(inference[index]!.body.thinking).toBeUndefined();
+    }
     expect(await refreshCatalog()).toHaveBeenCalledWith(
-      "Refreshed 1 cpa models. Refreshed 1 tcpa models.",
+      "Refreshed 1 cpa models. Refreshed 1 tcpa models. Refreshed 1 cpamp models.",
       "info",
     );
     expect(catalogs).toEqual([
       ["https://cpa.example/v1/models?client_version=pi", "Bearer codex-key"],
       ["https://tcpa.example/v1/models?client_version=pi", "Bearer gateway-key"],
+      ["https://cpamp.example/v1/models?client_version=pi", "Bearer responses-key"],
       ["https://cpa.example/v1/models?client_version=pi", "Bearer codex-key"],
       ["https://tcpa.example/v1/models?client_version=pi", "Bearer gateway-key"],
+      ["https://cpamp.example/v1/models?client_version=pi", "Bearer responses-key"],
     ]);
     for (const [id, api] of [
       ["cpa", "openai-codex-responses"],
       ["tcpa", "anthropic-messages"],
+      ["cpamp", "openai-responses"],
     ]) {
       const cache = JSON.parse(readFileSync(join(dir, catalogCache(id!)), "utf8"));
       expect(cache.api).toBe(api);
@@ -316,6 +501,11 @@ describe("per-endpoint protocols", () => {
     [undefined, "anthropic-messages"],
     ["openai-codex-responses", "anthropic-messages"],
     ["anthropic-messages", "openai-codex-responses"],
+    [undefined, "openai-responses"],
+    ["openai-codex-responses", "openai-responses"],
+    ["anthropic-messages", "openai-responses"],
+    ["openai-responses", "openai-codex-responses"],
+    ["openai-responses", "anthropic-messages"],
   ])("rejects stale %s metadata when configured as %s", async (cachedApi, api) => {
     writeConfig({ api, apiKey: "synthetic", baseUrl: "https://gateway.example" });
     writeFileSync(
@@ -340,9 +530,14 @@ describe("per-endpoint protocols", () => {
     expect(JSON.parse(readFileSync(join(dir, "cliproxyapi-models.json"), "utf8")).api).toBe(api);
   });
 
-  it("uses a matching Anthropic cache while its background refresh is offline", async () => {
+  it.each([
+    [undefined, "openai-codex-responses", "https://gateway.example/backend-api/"],
+    ["openai-codex-responses", "openai-codex-responses", "https://gateway.example/backend-api/"],
+    ["anthropic-messages", "anthropic-messages", "https://gateway.example"],
+    ["openai-responses", "openai-responses", "https://gateway.example/v1"],
+  ])("uses a matching %s cache while its background refresh is offline", async (cachedApi, api, baseUrl) => {
     writeConfig({
-      api: "anthropic-messages",
+      api,
       apiKey: "synthetic",
       baseUrl: "https://gateway.example",
     });
@@ -350,15 +545,15 @@ describe("per-endpoint protocols", () => {
       join(dir, "cliproxyapi-models.json"),
       JSON.stringify({
         modelsUrl: "https://gateway.example/v1/models?client_version=pi",
-        api: "anthropic-messages",
-        models: [modelFixture("cached-glm")],
+        api: cachedApi,
+        models: [modelFixture("cached-model")],
       }),
     );
     vi.mocked(globalThis.fetch).mockRejectedValue(new Error("offline"));
     await cpaExtension(pi);
-    expect(runtime.getModel("cpa", "cached-glm")).toMatchObject({
-      api: "anthropic-messages",
-      baseUrl: "https://gateway.example",
+    expect(runtime.getModel("cpa", "cached-model")).toMatchObject({
+      api,
+      baseUrl,
     });
   });
 });
@@ -617,6 +812,7 @@ const timer = setInterval(() => {
   it.each([
     "openai-codex-responses",
     "anthropic-messages",
+    "openai-responses",
   ])("reloads isolated command credentials with %s", async (api) => {
     const files = ["a", "b"].map((id) => {
       const value = join(dir, `value-${id}`);

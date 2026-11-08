@@ -8,7 +8,11 @@ import {
   normalizeContext,
   type ProviderStreams,
 } from "@earendil-works/pi-ai";
-import { anthropicMessagesApi, openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
+import {
+  anthropicMessagesApi,
+  openAICodexResponsesApi,
+  openAIResponsesApi,
+} from "@earendil-works/pi-ai/compat";
 import {
   type ExtensionAPI,
   getAgentDir,
@@ -17,7 +21,8 @@ import {
 
 const codexApi = openAICodexResponsesApi();
 const anthropicApi = anthropicMessagesApi();
-type EndpointApi = "openai-codex-responses" | "anthropic-messages";
+const responsesApi = openAIResponsesApi();
+type EndpointApi = "openai-codex-responses" | "anthropic-messages" | "openai-responses";
 const KEY_CACHE = Symbol.for("@getpie/pi-cliproxyapi-provider.keys");
 const processState = globalThis as typeof globalThis & {
   [KEY_CACHE]?: Map<string, Promise<string | undefined>>;
@@ -107,11 +112,12 @@ export function resolveEndpoints(baseUrl?: string, api: EndpointApi = "openai-co
   const url = new URL(/^https?:\/\//i.test(s) ? s : `http://${s}`);
   const root = url.pathname
     .replace(/\/+$/, "")
-    .replace(api === "anthropic-messages" ? /\/v1$/ : /\/(?:v1|backend-api)$/, "");
+    .replace(api === "openai-codex-responses" ? /\/(?:v1|backend-api)$/ : /\/v1$/, "");
   return {
-    // Native Anthropic appends /v1/messages to baseURL (including any gateway path prefix).
-    inferenceBaseUrl:
-      api === "anthropic-messages" ? `${url.origin}${root}` : `${url.origin}${root}/backend-api/`,
+    // Native APIs append /v1/messages (Anthropic) or /responses (OpenAI) to baseURL.
+    inferenceBaseUrl: `${url.origin}${root}${
+      api === "openai-codex-responses" ? "/backend-api/" : api === "openai-responses" ? "/v1" : ""
+    }`,
     modelsUrl: `${url.origin}${root}/v1/models?client_version=pi`,
   };
 }
@@ -134,7 +140,11 @@ export function loadEndpoints(
     const rawKey = setting("CLIPROXYAPI_API_KEY", "apiKey");
     if (!rawKey) continue;
     const api = cfg.api === undefined ? "openai-codex-responses" : cfg.api;
-    if (api !== "openai-codex-responses" && api !== "anthropic-messages") {
+    if (
+      api !== "openai-codex-responses" &&
+      api !== "anthropic-messages" &&
+      api !== "openai-responses"
+    ) {
       warnings.push("[cliproxyapi] Unsupported api; provider not registered.");
       continue;
     }
@@ -184,14 +194,14 @@ export async function fetchModels(
             .toLowerCase(),
         )
         .filter(Boolean);
-      // Codex effort strings are not Anthropic thinking budgets; only Codex gets this map.
+      // OpenAI effort strings are not Anthropic thinking budgets.
       // Pi hides levels mapped to null and omits the reasoning field when "off" maps to null.
       const level = (effort: string) => (efforts.includes(effort) ? effort : null);
       return {
         id,
         name: String(m.display_name ?? m.name ?? id).trim(),
         reasoning: efforts.length > 0,
-        ...(api === "openai-codex-responses" &&
+        ...(api !== "anthropic-messages" &&
           efforts.length > 0 && {
             thinkingLevelMap: {
               off: level("none"),
@@ -220,6 +230,7 @@ function bindEndpoint(
 ): RunningEndpoint {
   const { inferenceBaseUrl, modelsUrl } = urls;
   const cachePath = join(agentDir, ep.cacheFile);
+  const nativeApi = ep.api === "anthropic-messages" ? anthropicApi : responsesApi;
   // The Codex transport needs a JWT-shaped token for the account id, so Authorization carries the
   // wrapped key; CLIProxyAPI skips it and accepts the real key from X-Api-Key on SSE and WebSocket.
   const streamSimple: ProviderStreams["streamSimple"] = (model, context, options) =>
@@ -262,12 +273,12 @@ function bindEndpoint(
           baseUrl: inferenceBaseUrl,
         })),
         api:
-          ep.api === "anthropic-messages"
+          ep.api !== "openai-codex-responses"
             ? {
                 stream: (model, context, options) =>
-                  anthropicApi.stream(model, normalizeContext(context), options),
+                  nativeApi.stream(model, normalizeContext(context), options),
                 streamSimple: (model, context, options) =>
-                  anthropicApi.streamSimple(model, normalizeContext(context), options),
+                  nativeApi.streamSimple(model, normalizeContext(context), options),
               }
             : { stream: streamSimple, streamSimple },
       }),
