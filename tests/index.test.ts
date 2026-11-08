@@ -306,3 +306,83 @@ describe("endpoint configuration", () => {
     });
   });
 });
+
+describe("disabledModels configuration", () => {
+  const endpoint = {
+    api: "openai-codex-responses",
+    providerId: "cpa",
+    providerName: "cpa",
+    rawKey: "env-key",
+    baseUrl: undefined,
+    disabledModels: ["gpt-*", "cpa/Claude-*"],
+  };
+
+  it("trims patterns the same way for an object and an array, ignoring env", () => {
+    const config = { apiKey: "file-key", disabledModels: [" gpt-* ", "cpa/Claude-*"] };
+    const env = { CLIPROXYAPI_DISABLED_MODELS: "*env*", CLIPROXYAPI_API_KEY: "env-key" };
+    const result = loadEndpoints(config, env);
+    expect(loadEndpoints([config], env)).toEqual(result);
+    expect(result).toEqual({ warnings: [], endpoints: [endpoint] });
+    expect(loadEndpoints({ apiKey: "k", disabledModels: [] }, {})).toEqual(
+      loadEndpoints({ apiKey: "k" }, {}),
+    );
+    expect(loadEndpoints([{ apiKey: "k" }], {})).toEqual(
+      loadEndpoints([{ apiKey: "k", disabledModels: [] }], {}),
+    );
+  });
+
+  it.each([
+    "gpt-*",
+    ["ok", ""],
+    [" "],
+    [1],
+    null,
+    { pattern: "*" },
+  ])("rejects invalid disabledModels %j without echoing configuration", (disabledModels) => {
+    const config = {
+      apiKey: "secret-key",
+      baseUrl: "https://secret-host.example",
+      disabledModels,
+    };
+    const result = loadEndpoints(config, {});
+    expect(loadEndpoints([config], {})).toEqual(result);
+    expect(result).toEqual({
+      endpoints: [],
+      warnings: [
+        "[cliproxyapi] disabledModels must be an array of non-empty strings; provider not registered.",
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it("skips only the invalid endpoint", () => {
+    expect(
+      loadEndpoints(
+        [
+          {
+            providerId: "cpa",
+            apiKey: "secret-key",
+            baseUrl: "https://secret.example",
+            disabledModels: "nope",
+          },
+          { providerId: "tcpa", apiKey: "other", disabledModels: [" kept-* "] },
+        ],
+        {},
+      ),
+    ).toEqual({
+      warnings: [
+        "[cliproxyapi] disabledModels must be an array of non-empty strings; provider not registered.",
+      ],
+      endpoints: [
+        {
+          api: "openai-codex-responses",
+          providerId: "tcpa",
+          providerName: "tcpa",
+          rawKey: "other",
+          baseUrl: undefined,
+          disabledModels: ["kept-*"],
+        },
+      ],
+    });
+  });
+});

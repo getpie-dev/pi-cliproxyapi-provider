@@ -1014,3 +1014,146 @@ process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(value)}, "
     expect(seen[0]!.get("x-api-key")).toBe("key-a");
   });
 });
+
+describe("disabledModels registration", () => {
+  it("filters a fresh catalog at registration and still caches disabled ids", async () => {
+    writeConfig({
+      apiKey: "synthetic-key",
+      baseUrl: "https://gateway.example",
+      providerName: "Pretty",
+      disabledModels: ["*sonnet*", "cpa/gpt-5.4", "Pretty/gpt-5.4-mini", "Mini"],
+    });
+    vi.mocked(globalThis.fetch).mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: "hidden", visibility: "hide" },
+              { id: "unlisted", visibility: "none" },
+              { slug: "claude-sonnet-4-5", display_name: "Sonnet" },
+              { id: "gpt-5.4" },
+              {
+                id: "gpt-5.4-mini",
+                display_name: "Mini",
+                input_modalities: ["text", "image"],
+                supported_reasoning_levels: ["high"],
+              },
+              { id: "org/model" },
+            ],
+          }),
+        ),
+    );
+    await cpaExtension(pi);
+    expect(runtime.getModel("cpa", "claude-sonnet-4-5")).toBeUndefined();
+    expect(runtime.getModel("cpa", "gpt-5.4")).toBeUndefined();
+    expect(runtime.getModel("cpa", "hidden")).toBeUndefined();
+    expect(runtime.getModel("cpa", "unlisted")).toBeUndefined();
+    expect(runtime.getModel("cpa", "gpt-5.4-mini")).toMatchObject({
+      name: "Mini",
+      api: "openai-codex-responses",
+      reasoning: true,
+      input: ["text", "image"],
+    });
+    expect(runtime.getModel("cpa", "org/model")?.id).toBe("org/model");
+    const cache = JSON.parse(readFileSync(join(dir, "cliproxyapi-models.json"), "utf8"));
+    expect(cache.models.map((model: { id: string }) => model.id).sort()).toEqual([
+      "claude-sonnet-4-5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "org/model",
+    ]);
+    expect(JSON.stringify(cache)).not.toContain("synthetic-key");
+  });
+
+  it("filters a cached catalog locally and restores models after the patterns are cleared", async () => {
+    const baseUrl = "https://gateway.example";
+    const ids = ["claude-sonnet-4-5", "gpt-5.4", "gpt-5.4-mini", "org/model"];
+    writeConfig({
+      apiKey: "synthetic-key",
+      baseUrl,
+      disabledModels: ["*sonnet*", "gpt-5.4"],
+    });
+    writeFileSync(
+      join(dir, "cliproxyapi-models.json"),
+      JSON.stringify({
+        modelsUrl: resolveEndpoints(baseUrl).modelsUrl,
+        api: "openai-codex-responses",
+        models: ids.map((id) => modelFixture(id)),
+      }),
+    );
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error("offline"));
+    await cpaExtension(pi);
+    expect(runtime.getModel("cpa", "claude-sonnet-4-5")).toBeUndefined();
+    expect(runtime.getModel("cpa", "gpt-5.4")).toBeUndefined();
+    expect(runtime.getModel("cpa", "gpt-5.4-mini")?.id).toBe("gpt-5.4-mini");
+    expect(runtime.getModel("cpa", "org/model")?.id).toBe("org/model");
+    expect(
+      JSON.parse(readFileSync(join(dir, "cliproxyapi-models.json"), "utf8")).models.map(
+        (model: { id: string }) => model.id,
+      ),
+    ).toEqual(ids);
+
+    writeConfig({ apiKey: "synthetic-key", baseUrl, disabledModels: [] });
+    await cpaExtension(pi);
+    for (const id of ids) expect(runtime.getModel("cpa", id)?.id).toBe(id);
+    expect(
+      JSON.parse(readFileSync(join(dir, "cliproxyapi-models.json"), "utf8")).models.map(
+        (model: { id: string }) => model.id,
+      ),
+    ).toEqual(ids);
+  });
+
+  it("does not let one endpoint disable another provider or api", async () => {
+    writeConfig([
+      {
+        providerId: "cpa",
+        apiKey: "codex-key",
+        baseUrl: "https://a.example",
+        disabledModels: ["gpt-*", "tcpa/claude-sonnet-4-5"],
+      },
+      {
+        providerId: "tcpa",
+        api: "anthropic-messages",
+        apiKey: "gateway-key",
+        baseUrl: "https://b.example",
+        disabledModels: ["*mini*"],
+      },
+      {
+        providerId: "cpamp",
+        api: "openai-responses",
+        apiKey: "responses-key",
+        baseUrl: "https://c.example",
+      },
+    ]);
+    const authorization = new Set<string>();
+    vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) => {
+      authorization.add(new Headers(init?.headers).get("authorization") ?? "");
+      return new Response(
+        JSON.stringify({
+          data: [{ id: "gpt-5" }, { id: "claude-sonnet-4-5" }, { id: "claude-mini" }],
+        }),
+      );
+    });
+    await cpaExtension(pi);
+    const present = (provider: string) =>
+      ["gpt-5", "claude-sonnet-4-5", "claude-mini"].filter((id) => runtime.getModel(provider, id));
+    expect(present("cpa")).toEqual(["claude-sonnet-4-5", "claude-mini"]);
+    expect(present("tcpa")).toEqual(["gpt-5", "claude-sonnet-4-5"]);
+    expect(present("cpamp")).toEqual(["gpt-5", "claude-sonnet-4-5", "claude-mini"]);
+    expect(runtime.getModel("cpa", "claude-sonnet-4-5")?.api).toBe("openai-codex-responses");
+    expect(runtime.getModel("tcpa", "gpt-5")?.api).toBe("anthropic-messages");
+    expect(runtime.getModel("cpamp", "gpt-5")?.api).toBe("openai-responses");
+    expect(authorization).toEqual(
+      new Set(["Bearer codex-key", "Bearer gateway-key", "Bearer responses-key"]),
+    );
+    for (const id of ["cpa", "tcpa", "cpamp"]) {
+      const cache = JSON.parse(readFileSync(join(dir, catalogCache(id)), "utf8"));
+      expect(cache.models.map((model: { id: string }) => model.id)).toEqual([
+        "gpt-5",
+        "claude-sonnet-4-5",
+        "claude-mini",
+      ]);
+      expect(JSON.stringify(cache)).not.toContain("key");
+    }
+  });
+});

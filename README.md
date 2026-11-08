@@ -111,3 +111,31 @@ in-process result.
   }
 ]
 ```
+
+## Hide models (`disabledModels`)
+
+Each endpoint may set `disabledModels` to an array of patterns. Matching models are left out of that
+provider's registration only. The catalog cache still stores them, so clearing the list and running
+`/reload` shows them again even when the gateway cannot be fetched. Omit the field, or use `[]`, to
+register every model the server lists. There is no environment variable for this field. A value that
+is not an array of non-empty strings skips that endpoint with a warning and does not print the key
+or URL.
+
+```json
+{ "providerId": "cpa", "apiKey": "$CPA_GATEWAY_KEY", "disabledModels": ["*sonnet*", "cpa/gpt-5.4"] }
+```
+
+Patterns are case-insensitive and match the bare model id or `providerId/modelId`:
+
+- `claude-sonnet-4-5` and `cpa/gpt-5.4` are exact ids. `gpt-5.4` does not hide `gpt-5.4-mini`.
+- `*` is any characters except `/`. `?` is one of those characters. `*sonnet*` hides ids containing
+  `sonnet`. `cpa/gpt-*` hides only that provider's matching ids. `*` alone does not match an id that
+  contains `/`; use `**` or `*/*`.
+- `**` crosses `/` only when it is a whole path segment, as in `**`, `**/gpt-*`, or `cpa/**`.
+
+This is not Pi's `enabledModels` cycle list. It does not choose the startup model or a thinking
+level. `sonnet` does not hide `claude-sonnet-4-5` (no fuzzy id or display-name match), and
+`gpt-4o:high` hides only an id that literally ends in `:high`, not `gpt-4o`. Brackets are literal, so
+`model[1m]` hides that id; Pi's minimatch would treat `[1m]` in a glob as a character class. Brace
+expansion, extglobs, and backslash escapes are not supported. `*` also matches a leading `.`, which
+Pi's minimatch does not. One endpoint's list never hides another endpoint's models.

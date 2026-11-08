@@ -18,6 +18,7 @@ import {
   getAgentDir,
   type ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
+import { matchesModelPattern } from "./model-pattern.ts";
 
 const codexApi = openAICodexResponsesApi();
 const anthropicApi = anthropicMessagesApi();
@@ -53,6 +54,8 @@ interface EndpointConfig {
   providerName: string;
   rawKey: string;
   baseUrl?: string;
+  /** Omitted when unset or empty, so registration stays unfiltered. */
+  disabledModels?: string[];
 }
 
 interface ConfiguredEndpoint extends EndpointConfig {
@@ -122,6 +125,18 @@ export function resolveEndpoints(baseUrl?: string, api: EndpointApi = "openai-co
   };
 }
 
+function readDisabledModels(cfg: Record<string, unknown>): string[] | undefined | false {
+  if (!Object.hasOwn(cfg, "disabledModels")) return undefined;
+  const value = cfg.disabledModels;
+  if (!Array.isArray(value)) return false;
+  const patterns: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || item.trim() === "") return false;
+    patterns.push(item.trim());
+  }
+  return patterns;
+}
+
 export function loadEndpoints(
   config: unknown,
   env: NodeJS.ProcessEnv,
@@ -149,6 +164,13 @@ export function loadEndpoints(
       continue;
     }
     const providerId = setting("CLIPROXYAPI_PROVIDER_ID", "providerId") ?? "cpa";
+    const disabledModels = readDisabledModels(cfg);
+    if (disabledModels === false) {
+      warnings.push(
+        "[cliproxyapi] disabledModels must be an array of non-empty strings; provider not registered.",
+      );
+      continue;
+    }
     if (seen.has(providerId)) {
       warnings.push(
         `[cliproxyapi] Provider id ${JSON.stringify(providerId)} is configured more than once; the duplicate was skipped.`,
@@ -162,6 +184,7 @@ export function loadEndpoints(
       providerName: setting("CLIPROXYAPI_PROVIDER_NAME", "providerName") ?? providerId,
       rawKey,
       baseUrl: setting("CLIPROXYAPI_BASE_URL", "baseUrl"),
+      ...(disabledModels && disabledModels.length > 0 ? { disabledModels } : {}),
     });
   }
   return { endpoints, warnings };
@@ -243,6 +266,13 @@ function bindEndpoint(
     });
 
   const register = (models: ProviderModelConfig[]) => {
+    const patterns = ep.disabledModels;
+    const visible = patterns
+      ? models.filter(
+          (model) =>
+            !patterns.some((pattern) => matchesModelPattern(pattern, ep.providerId, model.id)),
+        )
+      : models;
     pi.unregisterProvider(ep.providerId);
     pi.registerProvider(
       createProvider({
@@ -266,7 +296,7 @@ function bindEndpoint(
             },
           },
         },
-        models: models.map((model) => ({
+        models: visible.map((model) => ({
           ...model,
           provider: ep.providerId,
           api: ep.api,
