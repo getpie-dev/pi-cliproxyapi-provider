@@ -18,7 +18,7 @@ import {
   getAgentDir,
   type ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
-import { matchesModelPattern } from "./model-pattern.ts";
+import { omitDisabledModels } from "./model-pattern.ts";
 
 const codexApi = openAICodexResponsesApi();
 const anthropicApi = anthropicMessagesApi();
@@ -266,13 +266,7 @@ function bindEndpoint(
     });
 
   const register = (models: ProviderModelConfig[]) => {
-    const patterns = ep.disabledModels;
-    const visible = patterns
-      ? models.filter(
-          (model) =>
-            !patterns.some((pattern) => matchesModelPattern(pattern, ep.providerId, model.id)),
-        )
-      : models;
+    const visible = omitDisabledModels(models, ep.providerId, ep.disabledModels);
     pi.unregisterProvider(ep.providerId);
     pi.registerProvider(
       createProvider({

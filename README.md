@@ -122,20 +122,25 @@ is not an array of non-empty strings skips that endpoint with a warning and does
 or URL.
 
 ```json
-{ "providerId": "cpa", "apiKey": "$CPA_GATEWAY_KEY", "disabledModels": ["*sonnet*", "cpa/gpt-5.4"] }
+{
+  "providerId": "cpa",
+  "apiKey": "$CPA_GATEWAY_KEY",
+  "disabledModels": ["*sonnet*", "cpa/gpt-5.4", "gpt-{4,5}*"]
+}
 ```
 
-Patterns are case-insensitive and match the bare model id or `providerId/modelId`:
+A pattern uses Pi 1.5's minimatch 11 rules with `{ nocase: true }`, against both `providerId/modelId`
+and the bare model id. Pi treats a pattern as a glob only when it contains `*`, `?`, or `[`. That
+covers slash-aware `*` and `**`, `?`, character classes, braces (`gpt-{4,5}*`), extglobs
+(`gpt-@(4|5)*`), and backslash escapes. `*` does not cross `/` and does not match a name segment that
+starts with `.`. `*/*` hides every slash-free id on that provider, because the qualified id has one
+slash, and also hides a bare id that itself contains one slash.
 
-- `claude-sonnet-4-5` and `cpa/gpt-5.4` are exact ids. `gpt-5.4` does not hide `gpt-5.4-mini`.
-- `*` is any characters except `/`. `?` is one of those characters. `*sonnet*` hides ids containing
-  `sonnet`. `cpa/gpt-*` hides only that provider's matching ids. `*` alone does not match an id that
-  contains `/`; use `**` or `*/*`.
-- `**` crosses `/` only when it is a whole path segment, as in `**`, `**/gpt-*`, or `cpa/**`.
+If the glob is also an exact id in that endpoint's catalog, only the exact id is hidden. That is how
+Pi keeps a real id such as `model[1m]` from being read as a character class while the model is listed.
 
-This is not Pi's `enabledModels` cycle list. It does not choose the startup model or a thinking
-level. `sonnet` does not hide `claude-sonnet-4-5` (no fuzzy id or display-name match), and
-`gpt-4o:high` hides only an id that literally ends in `:high`, not `gpt-4o`. Brackets are literal, so
-`model[1m]` hides that id; Pi's minimatch would treat `[1m]` in a glob as a character class. Brace
-expansion, extglobs, and backslash escapes are not supported. `*` also matches a leading `.`, which
-Pi's minimatch does not. One endpoint's list never hides another endpoint's models.
+This is not Pi's `enabledModels` cycle list. It does not select the startup model or a thinking level.
+It also does not fuzzy-match ids or display names: `sonnet` does not hide `claude-sonnet-4-5`. A
+`:thinking` suffix stays part of the pattern, so `gpt-4o:high` does not hide `gpt-4o` and `cpa/*:high`
+does not mean `cpa/*`. A brace-only or extglob-only string is an exact id unless it also contains
+`*`, `?`, or `[`. One endpoint's list never hides another endpoint's models.

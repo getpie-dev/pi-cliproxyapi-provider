@@ -1,47 +1,41 @@
-// shortcut: not minimatch character classes, braces, extglobs, escapes, or dotfile rules; add them only if a catalog needs them.
+import { minimatch } from "minimatch";
 
-/** Case-insensitive Pi 1.5 model glob (`*`, `?`, segment `**`) against `provider/id` and the bare id. */
-export function matchesModelPattern(pattern: string, providerId: string, modelId: string): boolean {
-  const spec = pattern.trim();
-  if (!spec || !modelId.trim()) return false;
-  const targets = [`${providerId}/${modelId}`, modelId];
-  if (targets.some((target) => target.toLowerCase() === spec.toLowerCase())) return true;
-  // A literal `[` is not a character class. Exact equality above already matched ids that contain one.
-  if (!spec.includes("*") && !spec.includes("?")) return false;
-  return targets.some((target) => new RegExp(`^${globSource(spec)}$`, "i").test(target));
+const MINIMATCH_OPTIONS = { nocase: true } as const;
+
+/** Drop models whose id matches a disabledModels pattern. Unset or empty patterns keep every model. */
+export function omitDisabledModels<T extends { id: string }>(
+  models: readonly T[],
+  providerId: string,
+  patterns?: readonly string[],
+): T[] {
+  if (!patterns?.length) return [...models];
+  const disabled = new Set<T>();
+  for (const pattern of patterns) {
+    for (const model of modelsForPattern(models, providerId, pattern)) disabled.add(model);
+  }
+  return models.filter((model) => !disabled.has(model));
 }
 
-/** `*` and `?` stay inside one `/` segment. `**` crosses `/` only as a whole segment, like minimatch. */
-function globSource(pattern: string): string {
-  let out = "";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "*") {
-      let stars = 1;
-      while (pattern[i + 1] === "*") {
-        stars++;
-        i++;
-      }
-      const start = i - stars + 1;
-      const boundaryBefore = start === 0 || pattern[start - 1] === "/";
-      const next = pattern[i + 1];
-      if (stars === 2 && boundaryBefore && (next === undefined || next === "/")) {
-        if (next === "/") {
-          out += "(?:.*/)?";
-          i++;
-        } else {
-          out += ".*";
-        }
-      } else {
-        out += "[^/]*";
-      }
-      continue;
-    }
-    if (c === "?") {
-      out += "[^/]";
-      continue;
-    }
-    out += /[.+^${}()|[\]\\]/.test(c) ? `\\${c}` : c;
-  }
-  return out;
+// Pi globs only for `*`, `?`, or `[`, with minimatch on `provider/id` and the bare id.
+// A listed exact id wins, so `model[1m]` is not a character class while that model exists.
+function modelsForPattern<T extends { id: string }>(
+  models: readonly T[],
+  providerId: string,
+  pattern: string,
+): readonly T[] {
+  const spec = pattern.trim();
+  if (!spec) return [];
+  const exact = models.filter((model) => exactModel(spec, providerId, model.id));
+  const glob = spec.includes("*") || spec.includes("?") || spec.includes("[");
+  if (!glob || exact.length > 0) return exact;
+  return models.filter(
+    (model) =>
+      minimatch(`${providerId}/${model.id}`, spec, MINIMATCH_OPTIONS) ||
+      minimatch(model.id, spec, MINIMATCH_OPTIONS),
+  );
+}
+
+function exactModel(spec: string, providerId: string, modelId: string): boolean {
+  const folded = spec.toLowerCase();
+  return folded === modelId.toLowerCase() || folded === `${providerId}/${modelId}`.toLowerCase();
 }
